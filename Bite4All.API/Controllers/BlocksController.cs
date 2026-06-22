@@ -86,6 +86,28 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
             }
         }
 
+        // Fix: prevent duplicate active block relations — return 409 Conflict instead of
+        // letting the DB unique index throw an unhandled exception.
+        var existing = unitOfWork.BlockRelations.Query().FirstOrDefault(b =>
+            b.HospitalityPartnerId == request.HospitalityPartnerId &&
+            b.CharityOrganizationId == request.CharityOrganizationId);
+
+        if (existing is not null)
+        {
+            if (existing.IsActive)
+            {
+                return Conflict(new { message = "An active block already exists between these two parties." });
+            }
+
+            // Reactivate and update flags on a previously deactivated block
+            existing.IsActive = true;
+            existing.BlockedByHospitalityPartner = request.BlockedByHospitalityPartner || existing.BlockedByHospitalityPartner;
+            existing.BlockedByOrganization = request.BlockedByOrganization || existing.BlockedByOrganization;
+            existing.Reason = request.Reason;
+            await unitOfWork.SaveChangesAsync(cancellationToken);
+            return Ok(existing);
+        }
+
         var block = new BlockRelation
         {
             HospitalityPartnerId = request.HospitalityPartnerId,

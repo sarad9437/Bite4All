@@ -23,9 +23,13 @@ public class CreateFoodOfferRequestValidator : AbstractValidator<CreateFoodOffer
             .GreaterThanOrEqualTo(_ => DateTime.UtcNow.AddHours(2))
             .WithMessage("Food must be valid for at least two hours from offer creation.");
 
+        // Fix: added upper bound — no more than 24 hours (1440 minutes) response window.
+        // Without this, a caller could set 999999 minutes and effectively freeze the cascade.
         RuleFor(r => r.MatchResponseWindowMinutes)
             .GreaterThan(0)
-            .WithMessage("Match response window must be greater than zero.");
+            .WithMessage("Match response window must be greater than zero.")
+            .LessThanOrEqualTo(1440)
+            .WithMessage("Match response window cannot exceed 1440 minutes (24 hours).");
 
         RuleFor(r => r.Items)
             .NotEmpty()

@@ -62,7 +62,6 @@ public class CampaignsController(IUnitOfWork unitOfWork, INotificationPublisher 
             return BadRequest(new { message = "Campaign name, valid date range and positive target quantity are required." });
         }
 
-        // Fix: partner can explicitly save as Draft without immediately submitting for approval.
         var campaign = new SpecialCampaign
         {
             HospitalityPartnerId = request.HospitalityPartnerId,
@@ -164,6 +163,12 @@ public class CampaignsController(IUnitOfWork unitOfWork, INotificationPublisher 
         return NoContent();
     }
 
+    /// <summary>
+    /// Approves or rejects a campaign that is in PendingApproval status.
+    /// Fix: only PendingApproval campaigns can be decided — Draft campaigns must first be
+    /// submitted via PUT /{id}/submit. This prevents admins from accidentally approving
+    /// a draft that the partner has not yet finished editing.
+    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpPut("{id}/decision")]
     public async Task<IActionResult> Decide(int id, ApprovalDecisionRequest request, CancellationToken cancellationToken)
@@ -174,9 +179,11 @@ public class CampaignsController(IUnitOfWork unitOfWork, INotificationPublisher 
             return NotFound();
         }
 
-        if (campaign.Status is not (CampaignStatus.Draft or CampaignStatus.PendingApproval))
+        // Fix: was `Draft or PendingApproval` — Draft should NOT be directly approvable.
+        // The partner must explicitly submit it first (PUT /{id}/submit).
+        if (campaign.Status != CampaignStatus.PendingApproval)
         {
-            return BadRequest(new { message = "Only draft or pending campaigns can be approved or rejected." });
+            return BadRequest(new { message = "Only campaigns that have been submitted for approval can be approved or rejected." });
         }
 
         campaign.Status = request.Approved ? CampaignStatus.Approved : CampaignStatus.Rejected;

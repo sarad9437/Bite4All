@@ -64,4 +64,40 @@ public class ReportsController(IImpactReportService impactReportService, IUnitOf
         var report = await impactReportService.GetOrganizationImpactAsync(charityOrganizationId, fromUtc, toUtc, cancellationToken);
         return report is null ? NotFound() : Ok(report);
     }
+
+    /// <summary>
+    /// Returns impact report for a driver — completed pickups, transported kg,
+    /// reputation score history and badge progress.
+    /// Accessible by the driver themselves, their organization's admin, or a platform administrator.
+    /// </summary>
+    [Authorize(Roles = "Driver,CharityOrganization,Administrator")]
+    [HttpGet("driver-impact/{driverId:int}")]
+    public async Task<ActionResult> GetDriverImpact(int driverId, [FromQuery] DateTime? fromUtc, [FromQuery] DateTime? toUtc, CancellationToken cancellationToken)
+    {
+        // Driver can only see their own report
+        if (!User.IsAdministrator() && User.DriverId() != driverId)
+        {
+            // A CharityOrganization user may access reports for their own drivers
+            if (User.CharityOrganizationId() is not int orgId)
+            {
+                return Forbid();
+            }
+
+            var driver = await unitOfWork.Drivers.GetByIdAsync(driverId, cancellationToken);
+            if (driver is null || driver.CharityOrganizationId != orgId)
+            {
+                return Forbid();
+            }
+
+            // Verify organization is approved
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(orgId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        var report = await impactReportService.GetDriverImpactAsync(driverId, fromUtc, toUtc, cancellationToken);
+        return report is null ? NotFound() : Ok(report);
+    }
 }

@@ -193,6 +193,50 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
         };
     }
 
+    public async Task<DriverImpactReportDto?> GetDriverImpactAsync(int driverId, DateTime? fromUtc, DateTime? toUtc, CancellationToken cancellationToken = default)
+    {
+        var driver = await unitOfWork.Drivers.GetByIdAsync(driverId, cancellationToken);
+        if (driver is null)
+        {
+            return null;
+        }
+
+        var pickups = FilterCompletedPickups(fromUtc, toUtc)
+            .Where(p => p.DriverId == driverId)
+            .ToList();
+
+        var transportedKg = pickups.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg);
+
+        var badges = unitOfWork.BadgeAssignments.Query()
+            .Where(b => b.ActorType == ActorType.Driver && b.ActorId == driverId)
+            .Select(b => new BadgeSummaryDto { Name = b.Name, Level = b.Level, AssignedByAdmin = b.AssignedByAdmin })
+            .ToList();
+
+        var history = unitOfWork.ReputationSnapshots.Query()
+            .Where(r => r.ActorType == ActorType.Driver && r.ActorId == driverId)
+            .OrderBy(r => r.CreatedAtUtc)
+            .Select(r => new ReputationHistoryDto
+            {
+                RecordedAtUtc = r.CreatedAtUtc,
+                Score = r.Score,
+                Source = r.Source
+            })
+            .ToList();
+
+        return new DriverImpactReportDto
+        {
+            DriverId = driverId,
+            DriverName = driver.FullName,
+            CompletedPickups = driver.CompletedPickups,
+            TransportedKg = transportedKg,
+            CancellationCount = driver.CancellationCount,
+            ReputationScore = driver.ReputationScore,
+            NextBadgeHint = GetNextDriverBadgeHint(driver.CompletedPickups, driver.ReputationScore),
+            ReputationHistory = history,
+            Badges = badges
+        };
+    }
+
     private IQueryable<PickupDocument> FilterCompletedPickups(DateTime? fromUtc, DateTime? toUtc)
     {
         var pickups = unitOfWork.PickupDocuments.Query()
@@ -268,6 +312,26 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
         if (successfulDonations < 500 || totalDonatedKg < 2000 || reputationScore < 4.5)
         {
             return "Gold badge at 500 successful donations, 2000kg donated and 4.5 reputation.";
+        }
+
+        return "Eligible for manual Platinum or special community badge review.";
+    }
+
+    private static string GetNextDriverBadgeHint(int completedPickups, double reputationScore)
+    {
+        if (completedPickups < 50)
+        {
+            return $"Bronze badge at 50 completed pickups ({50 - completedPickups} remaining).";
+        }
+
+        if (completedPickups < 200)
+        {
+            return "Silver badge at 200 completed pickups.";
+        }
+
+        if (completedPickups < 500 || reputationScore < 4.5)
+        {
+            return "Gold badge at 500 completed pickups and 4.5 reputation.";
         }
 
         return "Eligible for manual Platinum or special community badge review.";
