@@ -74,12 +74,20 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         page = Math.Max(page, 1);
         pageSize = Math.Clamp(pageSize, 1, 100);
 
-        var query = unitOfWork.FoodOffers.Query()
+        // Fix: count and paginate in the query before materializing — avoids loading all active
+        // offers into memory just to then skip most of them.
+        var baseQuery = unitOfWork.FoodOffers.Query()
             .Where(o => o.Status == FoodOfferStatus.Active || o.Status == FoodOfferStatus.PublicFallback)
-            .OrderBy(o => o.PickupWindowStartUtc)
+            .OrderBy(o => o.PickupWindowStartUtc);
+
+        var totalCount = baseQuery.Count();
+
+        var page_items = baseQuery
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .ToList();
 
-        foreach (var offer in query)
+        foreach (var offer in page_items)
         {
             LoadDetails(offer);
         }
@@ -88,8 +96,8 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         {
             Page = page,
             PageSize = pageSize,
-            TotalCount = query.Count,
-            Items = query.Skip((page - 1) * pageSize).Take(pageSize).Select(ToDto).ToList()
+            TotalCount = totalCount,
+            Items = page_items.Select(ToDto).ToList()
         });
     }
 
@@ -98,12 +106,19 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         request.Page = Math.Max(request.Page, 1);
         request.PageSize = Math.Clamp(request.PageSize, 1, 100);
 
-        var query = unitOfWork.FoodOffers.Query()
+        // Fix: same pattern — count first, then paginate, then load details only for the page.
+        var baseQuery = unitOfWork.FoodOffers.Query()
             .ApplySearch(request)
-            .OrderBy(o => o.PickupWindowStartUtc)
+            .OrderBy(o => o.PickupWindowStartUtc);
+
+        var totalCount = baseQuery.Count();
+
+        var page_items = baseQuery
+            .Skip((request.Page - 1) * request.PageSize)
+            .Take(request.PageSize)
             .ToList();
 
-        foreach (var offer in query)
+        foreach (var offer in page_items)
         {
             LoadDetails(offer);
         }
@@ -112,12 +127,8 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         {
             Page = request.Page,
             PageSize = request.PageSize,
-            TotalCount = query.Count,
-            Items = query
-                .Skip((request.Page - 1) * request.PageSize)
-                .Take(request.PageSize)
-                .Select(ToDto)
-                .ToList()
+            TotalCount = totalCount,
+            Items = page_items.Select(ToDto).ToList()
         });
     }
 

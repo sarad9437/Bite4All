@@ -33,6 +33,54 @@ public class CampaignsController(IUnitOfWork unitOfWork, INotificationPublisher 
             .ToList());
     }
 
+    /// <summary>
+    /// Creates a campaign as a Draft (not yet submitted for approval).
+    /// The partner can review and edit it before submitting.
+    /// </summary>
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpPost("draft")]
+    public async Task<ActionResult<SpecialCampaign>> CreateDraft(CreateCampaignRequest request, CancellationToken cancellationToken)
+    {
+        if (!User.IsAdministrator() && User.HospitalityPartnerId() != request.HospitalityPartnerId)
+        {
+            return Forbid();
+        }
+
+        var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(request.HospitalityPartnerId, cancellationToken);
+        if (partner is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && partner.ApprovalStatus != ApprovalStatus.Approved)
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Name) || request.TargetQuantityKg <= 0 || request.EndsOn < request.StartsOn)
+        {
+            return BadRequest(new { message = "Campaign name, valid date range and positive target quantity are required." });
+        }
+
+        // Fix: partner can explicitly save as Draft without immediately submitting for approval.
+        var campaign = new SpecialCampaign
+        {
+            HospitalityPartnerId = request.HospitalityPartnerId,
+            Name = request.Name,
+            Description = request.Description,
+            StartsOn = request.StartsOn,
+            EndsOn = request.EndsOn,
+            TargetQuantityKg = request.TargetQuantityKg,
+            Status = CampaignStatus.Draft
+        };
+        await unitOfWork.SpecialCampaigns.AddAsync(campaign, cancellationToken);
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        return Ok(campaign);
+    }
+
+    /// <summary>
+    /// Creates a campaign and immediately submits it for admin approval.
+    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPost]
     public async Task<ActionResult<SpecialCampaign>> Create(CreateCampaignRequest request, CancellationToken cancellationToken)
@@ -78,6 +126,42 @@ public class CampaignsController(IUnitOfWork unitOfWork, INotificationPublisher 
             cancellationToken,
             NotificationType.AdminMessage);
         return Ok(campaign);
+    }
+
+    /// <summary>
+    /// Submits an existing Draft campaign for admin approval.
+    /// Only the owning partner or admin can do this.
+    /// </summary>
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpPut("{id}/submit")]
+    public async Task<IActionResult> Submit(int id, CancellationToken cancellationToken)
+    {
+        var campaign = await unitOfWork.SpecialCampaigns.GetByIdAsync(id, cancellationToken);
+        if (campaign is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.HospitalityPartnerId() != campaign.HospitalityPartnerId)
+        {
+            return Forbid();
+        }
+
+        if (campaign.Status != CampaignStatus.Draft)
+        {
+            return BadRequest(new { message = "Only draft campaigns can be submitted for approval." });
+        }
+
+        campaign.Status = CampaignStatus.PendingApproval;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        await notificationPublisher.NotifyAsync(
+            ActorType.Administrator,
+            0,
+            "Campaign awaiting approval",
+            $"Hospitality partner #{campaign.HospitalityPartnerId} submitted campaign \"{campaign.Name}\" for review.",
+            cancellationToken,
+            NotificationType.AdminMessage);
+        return NoContent();
     }
 
     [Authorize(Roles = "Administrator")]

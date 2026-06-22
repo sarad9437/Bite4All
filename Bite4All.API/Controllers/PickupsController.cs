@@ -20,6 +20,15 @@ public class PickupsController(
     INotificationPublisher notificationPublisher,
     IHubContext<NotificationsHub> hubContext) : ControllerBase
 {
+    private static readonly PickupStatus[] ActiveStatuses =
+    [
+        PickupStatus.Created,
+        PickupStatus.Assigned,
+        PickupStatus.DriverConfirmed,
+        PickupStatus.PickedUp,
+        PickupStatus.ProblemReported
+    ];
+
     [Authorize]
     [HttpGet("{id:int}")]
     public async Task<ActionResult<PickupDocumentDto>> GetById(int id, CancellationToken cancellationToken)
@@ -39,17 +48,32 @@ public class PickupsController(
         return Ok(ToDto(pickup));
     }
 
+    /// <summary>
+    /// Returns pickups for a driver.
+    /// Use ?activeOnly=true to get only in-progress tasks (Created, Assigned, DriverConfirmed, PickedUp, ProblemReported).
+    /// </summary>
     [Authorize(Roles = "Driver,Administrator")]
     [HttpGet("driver/{driverId:int}")]
-    public async Task<ActionResult<List<PickupDocumentDto>>> GetForDriver(int driverId, CancellationToken cancellationToken)
+    public async Task<ActionResult<List<PickupDocumentDto>>> GetForDriver(
+        int driverId,
+        [FromQuery] bool activeOnly = false,
+        CancellationToken cancellationToken = default)
     {
         if (!User.IsAdministrator() && User.DriverId() != driverId)
         {
             return Forbid();
         }
 
-        var pickups = unitOfWork.PickupDocuments.Query()
-            .Where(p => p.DriverId == driverId)
+        // Fix: support activeOnly filter so the driver app can show only current tasks
+        var query = unitOfWork.PickupDocuments.Query()
+            .Where(p => p.DriverId == driverId);
+
+        if (activeOnly)
+        {
+            query = query.Where(p => ActiveStatuses.Contains(p.Status));
+        }
+
+        var pickups = query
             .OrderByDescending(p => p.CreatedAtUtc)
             .ToList();
 

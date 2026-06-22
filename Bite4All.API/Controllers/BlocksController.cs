@@ -26,18 +26,47 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
     [HttpPost]
     public async Task<ActionResult<BlockRelation>> Create(CreateBlockRequest request, CancellationToken cancellationToken)
     {
-        var canCreate =
-            User.IsAdministrator() ||
-            request.BlockedByHospitalityPartner && User.HospitalityPartnerId() == request.HospitalityPartnerId ||
-            request.BlockedByOrganization && User.CharityOrganizationId() == request.CharityOrganizationId;
-
-        if (!canCreate)
-        {
-            return Forbid();
-        }
-
+        // Fix: strict role-based validation — a hospitality partner cannot set BlockedByOrganization
+        // and a charity organization cannot set BlockedByHospitalityPartner.
         if (!User.IsAdministrator())
         {
+            var isPartner = User.HospitalityPartnerId() == request.HospitalityPartnerId;
+            var isOrganization = User.CharityOrganizationId() == request.CharityOrganizationId;
+
+            if (request.BlockedByHospitalityPartner && request.BlockedByOrganization)
+            {
+                // Only admin can set both flags at once
+                return Forbid();
+            }
+
+            if (request.BlockedByHospitalityPartner && !isPartner)
+            {
+                return Forbid();
+            }
+
+            if (request.BlockedByOrganization && !isOrganization)
+            {
+                return Forbid();
+            }
+
+            // A partner must NOT be able to set BlockedByOrganization
+            if (isPartner && !isOrganization && request.BlockedByOrganization)
+            {
+                return Forbid();
+            }
+
+            // An organization must NOT be able to set BlockedByHospitalityPartner
+            if (isOrganization && !isPartner && request.BlockedByHospitalityPartner)
+            {
+                return Forbid();
+            }
+
+            if (!isPartner && !isOrganization)
+            {
+                return Forbid();
+            }
+
+            // Verify approval status for the acting party
             if (request.BlockedByHospitalityPartner)
             {
                 var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(request.HospitalityPartnerId, cancellationToken);
