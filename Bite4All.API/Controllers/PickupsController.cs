@@ -172,7 +172,6 @@ public class PickupsController(
         await unitOfWork.PickupDocuments.AddAsync(document, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // Load full details (including offer items) before returning DTO
         document.FoodOffer = match.FoodOffer;
         document.HospitalityPartner = match.FoodOffer.HospitalityPartner;
         document.CharityOrganization = match.CharityOrganization;
@@ -246,8 +245,6 @@ public class PickupsController(
         vehicle.IsAvailable = false;
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // Spec: "Vozač dobija notifikaciju na svom nalogu sa svim detaljima —
-        // adresom objekta, vremenskim prozorom i spiskom hrane."
         var hospitalityPartner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
         var foodOffer = await unitOfWork.FoodOffers.GetByIdAsync(pickup.FoodOfferId, cancellationToken);
         var offerItems = foodOffer is not null
@@ -621,6 +618,98 @@ public class PickupsController(
         return Ok(issue);
     }
 
+    /// <summary>
+    /// Resolves a previously reported issue on a pickup, returning it to an actionable status.
+    ///
+    /// An admin or the organization can resolve an issue in one of two ways:
+    /// — "continue" resumes the pickup at the appropriate status (DriverConfirmed if a driver
+    ///   is still assigned, Created otherwise) so the pickup can proceed normally.
+    /// — "cancel" closes the pickup as Cancelled, releasing driver/vehicle and notifying
+    ///   the hospitality partner.
+    ///
+    /// This gives ProblemReported a clear, deterministic exit path instead of leaving it
+    /// permanently stuck.
+    /// </summary>
+    [Authorize(Roles = "CharityOrganization,Administrator")]
+    [HttpPut("{id}/resolve-issue")]
+    public async Task<IActionResult> ResolveIssue(int id, ResolvePickupIssueRequest request, CancellationToken cancellationToken)
+    {
+        var pickup = await unitOfWork.PickupDocuments.GetByIdAsync(id, cancellationToken);
+        if (pickup is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != pickup.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (pickup.Status != PickupStatus.ProblemReported)
+        {
+            return BadRequest(new { message = "Only pickups with a reported problem can be resolved." });
+        }
+
+        if (request.Cancel)
+        {
+            // Treat as organisation-side cancellation — release driver/vehicle, notify partner.
+            pickup.Status = PickupStatus.Cancelled;
+
+            if (pickup.DriverId.HasValue)
+            {
+                pickup.Driver ??= await unitOfWork.Drivers.GetByIdAsync(pickup.DriverId.Value, cancellationToken);
+                if (pickup.Driver is not null)
+                {
+                    pickup.Driver.IsAvailable = true;
+                }
+            }
+
+            if (pickup.VehicleId.HasValue)
+            {
+                pickup.Vehicle ??= await unitOfWork.Vehicles.GetByIdAsync(pickup.VehicleId.Value, cancellationToken);
+                if (pickup.Vehicle is not null)
+                {
+                    pickup.Vehicle.IsAvailable = true;
+                }
+            }
+
+            await unitOfWork.SaveChangesAsync(cancellationToken);
+            await notificationPublisher.NotifyAsync(
+                ActorType.HospitalityPartner,
+                pickup.HospitalityPartnerId,
+                "Pickup cancelled after issue",
+                $"Pickup {pickup.DocumentNumber} was cancelled after issue resolution.",
+                cancellationToken,
+                NotificationType.Cancellation);
+        }
+        else
+        {
+            // Resume: go back to DriverConfirmed if a driver is still assigned, otherwise Created.
+            pickup.Status = pickup.DriverId.HasValue ? PickupStatus.DriverConfirmed : PickupStatus.Created;
+            await unitOfWork.SaveChangesAsync(cancellationToken);
+            await notificationPublisher.NotifyAsync(
+                ActorType.HospitalityPartner,
+                pickup.HospitalityPartnerId,
+                "Pickup issue resolved",
+                $"The issue on pickup {pickup.DocumentNumber} has been resolved and the pickup is resuming.",
+                cancellationToken,
+                NotificationType.PickupStatusChanged);
+
+            if (pickup.DriverId.HasValue)
+            {
+                await notificationPublisher.NotifyAsync(
+                    ActorType.Driver,
+                    pickup.DriverId.Value,
+                    "Pickup resumed",
+                    $"The issue on pickup {pickup.DocumentNumber} has been resolved. Please continue.",
+                    cancellationToken,
+                    NotificationType.PickupStatusChanged);
+            }
+        }
+
+        return NoContent();
+    }
+
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPut("{id}/cancel-by-organization")]
     public async Task<IActionResult> CancelByOrganization(int id, CancelPickupRequest request, CancellationToken cancellationToken)
@@ -740,8 +829,6 @@ public class PickupsController(
         pickup.HospitalityPartner ??= await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
         pickup.CharityOrganization ??= await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
 
-        // Load food offer and its items so the DTO can include the full item list.
-        // Spec: "Dokument sadrži... detaljan spisak hrane koja se preuzima."
         pickup.FoodOffer ??= await unitOfWork.FoodOffers.GetByIdAsync(pickup.FoodOfferId, cancellationToken);
         if (pickup.FoodOffer is not null && pickup.FoodOffer.Items.Count == 0)
         {
@@ -778,7 +865,6 @@ public class PickupsController(
             DriverLatitude = pickup.Driver?.CurrentLatitude,
             DriverLongitude = pickup.Driver?.CurrentLongitude,
             DriverLocationUpdatedAtUtc = pickup.Driver?.LocationUpdatedAtUtc,
-            // Spec: "detaljan spisak hrane koja se preuzima" i "vozač dobija notifikaciju sa spiskom hrane"
             Items = pickup.FoodOffer?.Items.Select(i => new PickupItemDto
             {
                 Name = i.Name,

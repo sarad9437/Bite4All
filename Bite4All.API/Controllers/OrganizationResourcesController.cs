@@ -250,7 +250,10 @@ public class OrganizationResourcesController(
             return Forbid();
         }
 
+        // Fix: also nullify expiry timestamp so the scheduler doesn't attempt a redundant
+        // reset of an already-zeroed capacity on its next tick.
         organization.TemporaryExtraCapacityKg = 0;
+        organization.TemporaryCapacityExpiresAtUtc = null;
         await unitOfWork.SaveChangesAsync(cancellationToken);
         return NoContent();
     }
