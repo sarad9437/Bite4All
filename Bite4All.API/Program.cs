@@ -23,6 +23,12 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 var jwtOptions = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOptions();
+if (string.IsNullOrWhiteSpace(jwtOptions.Key) ||
+    jwtOptions.Key.StartsWith("REPLACE_WITH_", StringComparison.OrdinalIgnoreCase) ||
+    Encoding.UTF8.GetByteCount(jwtOptions.Key) < 32)
+{
+    throw new InvalidOperationException("Jwt:Key must be configured with a private value of at least 32 bytes. Use appsettings.Development.json locally or an environment variable in deployed environments.");
+}
 
 builder.Services.AddDbContext<Bite4AllContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));

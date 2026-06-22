@@ -1,0 +1,72 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+out/
+
+# Visual Studio and Rider
+.vs/
+.vscode/
+.idea/
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio Code local settings
+.history/
+
+# .NET test and coverage output
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+coverage.cobertura.xml
+coverage.opencover.xml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+project.assets.json
+
+# Logs
+*.log
+logs/
+
+# Local configuration and secrets
+appsettings.Development.json
+appsettings.Local.json
+appsettings.*.Local.json
+appsettings.Production.json
+*.Development.json
+*.local.json
+*.secrets.json
+!appsettings.Development.example.json
+!appsettings.*.example.json
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.mdf
+*.ldf
+
+# Publish and deployment artifacts
+publish/
+PublishProfiles/
+*.pubxml
+*.publishsettings
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Codex/local agent workspace metadata
+.agents/
+.codex/
