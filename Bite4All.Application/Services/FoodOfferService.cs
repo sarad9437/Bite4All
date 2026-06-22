@@ -32,6 +32,8 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
             PickupWindowStartUtc = request.PickupWindowStartUtc,
             PickupWindowEndUtc = request.PickupWindowEndUtc,
             ExpiresAtUtc = request.ExpiresAtUtc,
+            // Fix: copy MatchResponseWindowMinutes from request instead of always using entity default (30).
+            MatchResponseWindowMinutes = request.MatchResponseWindowMinutes > 0 ? request.MatchResponseWindowMinutes : 30,
             Note = request.Note,
             PhotoUrl = request.PhotoUrl,
             Status = FoodOfferStatus.Active
@@ -74,8 +76,6 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         page = Math.Max(page, 1);
         pageSize = Math.Clamp(pageSize, 1, 100);
 
-        // Fix: count and paginate in the query before materializing — avoids loading all active
-        // offers into memory just to then skip most of them.
         var baseQuery = unitOfWork.FoodOffers.Query()
             .Where(o => o.Status == FoodOfferStatus.Active || o.Status == FoodOfferStatus.PublicFallback)
             .OrderBy(o => o.PickupWindowStartUtc);
@@ -106,7 +106,6 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         request.Page = Math.Max(request.Page, 1);
         request.PageSize = Math.Clamp(request.PageSize, 1, 100);
 
-        // Fix: same pattern — count first, then paginate, then load details only for the page.
         var baseQuery = unitOfWork.FoodOffers.Query()
             .ApplySearch(request)
             .OrderBy(o => o.PickupWindowStartUtc);
@@ -168,6 +167,12 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
         if (request.ExpiresAtUtc.HasValue)
         {
             offer.ExpiresAtUtc = request.ExpiresAtUtc.Value;
+        }
+
+        // Fix: apply MatchResponseWindowMinutes when provided in an update request.
+        if (request.MatchResponseWindowMinutes.HasValue && request.MatchResponseWindowMinutes.Value > 0)
+        {
+            offer.MatchResponseWindowMinutes = request.MatchResponseWindowMinutes.Value;
         }
 
         offer.Note = request.Note ?? offer.Note;

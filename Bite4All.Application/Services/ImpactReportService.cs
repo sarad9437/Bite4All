@@ -41,6 +41,20 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
 
         var totalKg = pickupList.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg);
 
+        // Fix: apply the same date range to UniqueRecipientsHelped so the admin impact report is
+        // internally consistent. The old code always counted all-time distributions regardless of
+        // the fromUtc/toUtc window supplied by the caller.
+        var distributionsQuery = unitOfWork.RecipientMealDistributions.Query();
+        if (fromUtc.HasValue)
+        {
+            distributionsQuery = distributionsQuery.Where(d => d.DistributedAtUtc >= fromUtc.Value);
+        }
+        if (toUtc.HasValue)
+        {
+            distributionsQuery = distributionsQuery.Where(d => d.DistributedAtUtc <= toUtc.Value);
+        }
+        var uniqueRecipientsHelped = distributionsQuery.Select(d => d.RecipientId).Distinct().Count();
+
         return new AdminImpactReportDto
         {
             TotalRescuedKg = totalKg,
@@ -48,7 +62,7 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
             MealsProvided = (int)Math.Floor(totalKg * 2),
             UnusedOffersCount = unusedOfferList.Count,
             UnusedOffersKg = unusedOfferList.Sum(o => o.TotalQuantityKg),
-            UniqueRecipientsHelped = unitOfWork.RecipientMealDistributions.Query().Select(d => d.RecipientId).Distinct().Count(),
+            UniqueRecipientsHelped = uniqueRecipientsHelped,
             ActiveHospitalityPartners = unitOfWork.HospitalityPartners.Query().Count(p => p.ApprovalStatus == ApprovalStatus.Approved),
             ActiveOrganizations = unitOfWork.CharityOrganizations.Query().Count(o => o.ApprovalStatus == ApprovalStatus.Approved),
             ByCity = pickupList

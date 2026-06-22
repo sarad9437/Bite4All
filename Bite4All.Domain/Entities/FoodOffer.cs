@@ -9,6 +9,10 @@ public class FoodOffer : Entity
     public HospitalityPartner? HospitalityPartner { get; set; }
     public int? SpecialCampaignId { get; set; }
     public SpecialCampaign? SpecialCampaign { get; set; }
+    // Fix: track which RecurrentDonation produced this offer so the scheduler can check
+    // per-recurrent-donation instead of per-partner (a partner may have multiple schedules).
+    public int? RecurrentDonationId { get; set; }
+    public RecurrentDonation? RecurrentDonation { get; set; }
     public decimal TotalQuantityKg { get; set; }
     public FoodCategory Category { get; set; }
     public DateTime PickupWindowStartUtc { get; set; }

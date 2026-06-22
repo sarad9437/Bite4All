@@ -180,6 +180,26 @@ public class FoodOffersController(
         return Ok(new { offer.PhotoUrl });
     }
 
+    // Fix: add GET endpoint so partners can list their own recurrent donations and admins can see all.
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpGet("recurrent")]
+    public ActionResult<List<RecurrentDonation>> GetRecurrent(CancellationToken cancellationToken)
+    {
+        IQueryable<RecurrentDonation> query = unitOfWork.RecurrentDonations.Query();
+
+        if (!User.IsAdministrator())
+        {
+            var partnerId = User.HospitalityPartnerId();
+            if (partnerId is null)
+            {
+                return Forbid();
+            }
+            query = query.Where(r => r.HospitalityPartnerId == partnerId.Value);
+        }
+
+        return Ok(query.OrderByDescending(r => r.CreatedAtUtc).ToList());
+    }
+
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPost("recurrent")]
     public async Task<ActionResult<RecurrentDonation>> CreateRecurrent(CreateRecurrentDonationRequest request, CancellationToken cancellationToken)
@@ -279,6 +299,9 @@ public class FoodOffersController(
         if (offer is not null)
         {
             offer.CreatedFromRecurrentDonation = true;
+            // Fix: link the manually materialized offer back to its RecurrentDonation so the
+            // scheduler's per-recurrent deduplication check works correctly.
+            offer.RecurrentDonationId = recurrent.Id;
             offer.Status = FoodOfferStatus.PendingRestaurantConfirmation;
             await unitOfWork.SaveChangesAsync(cancellationToken);
         }

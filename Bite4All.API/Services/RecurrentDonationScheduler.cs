@@ -51,9 +51,14 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 continue;
             }
 
+            // Fix: check whether this specific recurrent donation (not any from the partner) already
+            // produced an offer today. The old code keyed only on HospitalityPartnerId, which meant
+            // that a partner with two separate recurrent schedules would have the second one silently
+            // skipped every day after the first one ran.
             var alreadyCreatedToday = unitOfWork.FoodOffers.Query().Any(o =>
                 o.CreatedFromRecurrentDonation &&
                 o.HospitalityPartnerId == recurrent.HospitalityPartnerId &&
+                o.RecurrentDonationId == recurrent.Id &&
                 o.CreatedAtUtc.Date == todayUtc);
 
             if (alreadyCreatedToday)
@@ -71,7 +76,8 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 ExpiresAtUtc = todayUtc.Add(recurrent.LocalPickupEnd.ToTimeSpan()).AddHours(Math.Max(recurrent.ShelfLifeHours, 2)),
                 Note = recurrent.NoteTemplate,
                 Status = FoodOfferStatus.PendingRestaurantConfirmation,
-                CreatedFromRecurrentDonation = true
+                CreatedFromRecurrentDonation = true,
+                RecurrentDonationId = recurrent.Id
             };
 
             offer.Items.Add(new FoodOfferItem
