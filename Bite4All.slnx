@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Bite4All.API/Bite4All.API.csproj" />
+  <Project Path="Bite4All.Application/Bite4All.Application.csproj" />
+  <Project Path="Bite4All.Domain/Bite4All.Domain.csproj" />
+  <Project Path="Bite4All.Infrastructure/Bite4All.Infrastructure.csproj" />
+  <Project Path="Bite4All.Tests/Bite4All.Tests.csproj" />
+</Solution>

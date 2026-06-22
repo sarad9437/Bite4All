@@ -1,0 +1,58 @@
+@Bite4All.API_HostAddress = http://localhost:5053
+@JwtToken = paste-token-here
+
+### Login as seeded admin
+POST {{Bite4All.API_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@bite4all.local",
+  "password": "Admin123!"
+}
+
+### Active cities
+GET {{Bite4All.API_HostAddress}}/cities
+
+### Register hospitality partner
+POST {{Bite4All.API_HostAddress}}/onboarding/hospitality-partners
+Content-Type: application/json
+
+{
+  "name": "Restoran Zeleni Kutak",
+  "partnerType": "Restoran",
+  "address": "Knez Mihailova 10",
+  "cityId": 1,
+  "contactEmail": "zeleni@bite4all.local",
+  "contactPhone": "+38164111111",
+  "taxIdentificationNumber": "123456789",
+  "latitude": 44.817,
+  "longitude": 20.457
+}
+
+### Create food offer
+POST {{Bite4All.API_HostAddress}}/food-offers
+Content-Type: application/json
+Authorization: Bearer {{JwtToken}}
+Idempotency-Key: offer-001
+
+{
+  "hospitalityPartnerId": 1,
+  "totalQuantityKg": 12,
+  "category": 1,
+  "pickupWindowStartUtc": "2026-06-22T18:00:00Z",
+  "pickupWindowEndUtc": "2026-06-22T20:00:00Z",
+  "expiresAtUtc": "2026-06-22T22:30:00Z",
+  "note": "Pekarski proizvodi od danas",
+  "items": [
+    { "name": "Hleb", "quantity": 8, "unit": "kom", "dietaryTags": 1 },
+    { "name": "Kifla", "quantity": 20, "unit": "kom", "dietaryTags": 1 }
+  ]
+}
+
+### Run matching
+POST {{Bite4All.API_HostAddress}}/food-offers/1/match
+Authorization: Bearer {{JwtToken}}
+
+### Admin impact report
+GET {{Bite4All.API_HostAddress}}/reports/admin-impact
+Authorization: Bearer {{JwtToken}}
