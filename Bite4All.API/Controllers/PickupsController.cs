@@ -245,7 +245,39 @@ public class PickupsController(
         driver.IsAvailable = false;
         vehicle.IsAvailable = false;
         await unitOfWork.SaveChangesAsync(cancellationToken);
-        await notificationPublisher.NotifyAsync(ActorType.Driver, request.DriverId, "Pickup assigned", $"Pickup {pickup.DocumentNumber} was assigned to you.", cancellationToken);
+
+        // Spec: "Vozač dobija notifikaciju na svom nalogu sa svim detaljima —
+        // adresom objekta, vremenskim prozorom i spiskom hrane."
+        var hospitalityPartner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
+        var foodOffer = await unitOfWork.FoodOffers.GetByIdAsync(pickup.FoodOfferId, cancellationToken);
+        var offerItems = foodOffer is not null
+            ? unitOfWork.FoodOfferItems.Query()
+                .Where(i => i.FoodOfferId == foodOffer.Id)
+                .ToList()
+            : [];
+
+        var itemsList = offerItems.Count > 0
+            ? string.Join(", ", offerItems.Select(i => $"{i.Name} ({i.Quantity} {i.Unit})"))
+            : "nema detalja stavki";
+
+        var pickupWindow = foodOffer is not null
+            ? $"{foodOffer.PickupWindowStartUtc:HH:mm}–{foodOffer.PickupWindowEndUtc:HH:mm} UTC"
+            : "nepoznat vremenski prozor";
+
+        var partnerAddress = hospitalityPartner?.Address ?? "nepoznata adresa";
+        var partnerName = hospitalityPartner?.Name ?? "nepoznat objekat";
+
+        await notificationPublisher.NotifyAsync(
+            ActorType.Driver,
+            request.DriverId,
+            "Dodeljeno preuzimanje",
+            $"Preuzimanje {pickup.DocumentNumber} je dodeljeno vama. " +
+            $"Objekat: {partnerName}, Adresa: {partnerAddress}, " +
+            $"Vremenski prozor: {pickupWindow}, " +
+            $"Hrana: {itemsList}.",
+            cancellationToken,
+            NotificationType.PickupAssigned);
+
         return NoContent();
     }
 
