@@ -64,7 +64,6 @@ public class PickupsController(
             return Forbid();
         }
 
-        // Fix: support activeOnly filter so the driver app can show only current tasks
         var query = unitOfWork.PickupDocuments.Query()
             .Where(p => p.DriverId == driverId);
 
@@ -172,7 +171,19 @@ public class PickupsController(
 
         await unitOfWork.PickupDocuments.AddAsync(document, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
-        return Ok(ToDto(document, match.FoodOffer.HospitalityPartner.Name, match.CharityOrganization.Name));
+
+        // Load full details (including offer items) before returning DTO
+        document.FoodOffer = match.FoodOffer;
+        document.HospitalityPartner = match.FoodOffer.HospitalityPartner;
+        document.CharityOrganization = match.CharityOrganization;
+        if (document.FoodOffer.Items.Count == 0)
+        {
+            document.FoodOffer.Items = unitOfWork.FoodOfferItems.Query()
+                .Where(i => i.FoodOfferId == document.FoodOfferId)
+                .ToList();
+        }
+
+        return Ok(ToDto(document));
     }
 
     [Authorize(Roles = "CharityOrganization,Administrator")]
@@ -696,6 +707,17 @@ public class PickupsController(
     {
         pickup.HospitalityPartner ??= await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
         pickup.CharityOrganization ??= await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
+
+        // Load food offer and its items so the DTO can include the full item list.
+        // Spec: "Dokument sadrži... detaljan spisak hrane koja se preuzima."
+        pickup.FoodOffer ??= await unitOfWork.FoodOffers.GetByIdAsync(pickup.FoodOfferId, cancellationToken);
+        if (pickup.FoodOffer is not null && pickup.FoodOffer.Items.Count == 0)
+        {
+            pickup.FoodOffer.Items = unitOfWork.FoodOfferItems.Query()
+                .Where(i => i.FoodOfferId == pickup.FoodOffer.Id)
+                .ToList();
+        }
+
         if (pickup.DriverId.HasValue)
         {
             pickup.Driver ??= await unitOfWork.Drivers.GetByIdAsync(pickup.DriverId.Value, cancellationToken);
@@ -709,20 +731,12 @@ public class PickupsController(
 
     private static PickupDocumentDto ToDto(PickupDocument pickup)
     {
-        return ToDto(
-            pickup,
-            pickup.HospitalityPartner?.Name ?? string.Empty,
-            pickup.CharityOrganization?.Name ?? string.Empty);
-    }
-
-    private static PickupDocumentDto ToDto(PickupDocument pickup, string partnerName, string organizationName)
-    {
         return new PickupDocumentDto
         {
             Id = pickup.Id,
             DocumentNumber = pickup.DocumentNumber,
-            PartnerName = partnerName,
-            OrganizationName = organizationName,
+            PartnerName = pickup.HospitalityPartner?.Name ?? string.Empty,
+            OrganizationName = pickup.CharityOrganization?.Name ?? string.Empty,
             Status = pickup.Status,
             PlannedQuantityKg = pickup.PlannedQuantityKg,
             ActualQuantityKg = pickup.ActualQuantityKg,
@@ -731,7 +745,15 @@ public class PickupsController(
             VehicleRegistrationNumber = pickup.Vehicle?.RegistrationNumber,
             DriverLatitude = pickup.Driver?.CurrentLatitude,
             DriverLongitude = pickup.Driver?.CurrentLongitude,
-            DriverLocationUpdatedAtUtc = pickup.Driver?.LocationUpdatedAtUtc
+            DriverLocationUpdatedAtUtc = pickup.Driver?.LocationUpdatedAtUtc,
+            // Spec: "detaljan spisak hrane koja se preuzima" i "vozač dobija notifikaciju sa spiskom hrane"
+            Items = pickup.FoodOffer?.Items.Select(i => new PickupItemDto
+            {
+                Name = i.Name,
+                Quantity = i.Quantity,
+                Unit = i.Unit,
+                DietaryTags = i.DietaryTags
+            }).ToList() ?? []
         };
     }
 }

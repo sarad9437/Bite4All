@@ -17,4 +17,17 @@ public class PickupDocumentDto
     public decimal? DriverLatitude { get; set; }
     public decimal? DriverLongitude { get; set; }
     public DateTime? DriverLocationUpdatedAtUtc { get; set; }
+    /// <summary>
+    /// Detaljan spisak stavki hrane iz ponude vezane za ovo preuzimanje.
+    /// Spec: "Dokument sadrži... detaljan spisak hrane koja se preuzima."
+    /// </summary>
+    public List<PickupItemDto> Items { get; set; } = [];
+}
+
+public class PickupItemDto
+{
+    public string Name { get; set; } = string.Empty;
+    public decimal Quantity { get; set; }
+    public string Unit { get; set; } = string.Empty;
+    public DietaryTag DietaryTags { get; set; }
 }
