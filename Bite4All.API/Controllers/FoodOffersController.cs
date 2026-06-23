@@ -25,7 +25,7 @@ public class FoodOffersController(
     IWebHostEnvironment environment,
     ISender sender) : ControllerBase
 {
-    // Fix 6: 5 MB upload limit for food offer photos.
+    // 5 MB upload limit for food offer photos.
     private const long MaxPhotoBytes = 5 * 1024 * 1024;
 
     [HttpGet]
@@ -50,20 +50,23 @@ public class FoodOffersController(
         }
 
         var isPublic = offer.Status is FoodOfferStatus.Active or FoodOfferStatus.PublicFallback;
-        var isOwner = User.IsAdministrator() || User.HospitalityPartnerId() == offer.HospitalityPartnerId;
-        var isMatchedOrganization = User.CharityOrganizationId() is int organizationId &&
-                                    unitOfWork.OfferMatches.Query().Any(m => m.FoodOfferId == offer.Id && m.CharityOrganizationId == organizationId);
 
         if (!isPublic)
         {
+            // Fix 9: return 404 instead of 403 for unauthenticated callers so we don't
+            // leak the existence of non-public offers to anonymous users.
             if (!(User.Identity?.IsAuthenticated ?? false))
             {
-                return Forbid();
+                return NotFound();
             }
+
+            var isOwner = User.IsAdministrator() || User.HospitalityPartnerId() == offer.HospitalityPartnerId;
+            var isMatchedOrganization = User.CharityOrganizationId() is int organizationId &&
+                                        unitOfWork.OfferMatches.Query().Any(m => m.FoodOfferId == offer.Id && m.CharityOrganizationId == organizationId);
 
             if (!isOwner && !isMatchedOrganization)
             {
-                return Forbid();
+                return NotFound();
             }
         }
 
@@ -165,7 +168,6 @@ public class FoodOffersController(
             return BadRequest(new { message = "A non-empty image file is required." });
         }
 
-        // Fix 6: reject files larger than 5 MB to prevent oversized uploads.
         if (file.Length > MaxPhotoBytes)
         {
             return BadRequest(new { message = "File size must not exceed 5 MB." });
@@ -189,7 +191,6 @@ public class FoodOffersController(
         return Ok(new { offer.PhotoUrl });
     }
 
-    // Fix: add GET endpoint so partners can list their own recurrent donations and admins can see all.
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpGet("recurrent")]
     public ActionResult<List<RecurrentDonation>> GetRecurrent(CancellationToken cancellationToken)
@@ -209,10 +210,6 @@ public class FoodOffersController(
         return Ok(query.OrderByDescending(r => r.CreatedAtUtc).ToList());
     }
 
-    /// <summary>
-    /// Fix 3: returns a single recurrent donation by id.
-    /// Partners can only retrieve their own; admins can retrieve any.
-    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpGet("recurrent/{id:int}")]
     public async Task<ActionResult<RecurrentDonation>> GetRecurrentById(int id, CancellationToken cancellationToken)
@@ -330,8 +327,6 @@ public class FoodOffersController(
         if (offer is not null)
         {
             offer.CreatedFromRecurrentDonation = true;
-            // Fix: link the manually materialized offer back to its RecurrentDonation so the
-            // scheduler's per-recurrent deduplication check works correctly.
             offer.RecurrentDonationId = recurrent.Id;
             offer.Status = FoodOfferStatus.PendingRestaurantConfirmation;
             await unitOfWork.SaveChangesAsync(cancellationToken);
@@ -418,6 +413,17 @@ public class FoodOffersController(
 
         offer.Status = FoodOfferStatus.Active;
         await unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // Fix 10: notify the owning partner that their recurrent offer is now active,
+        // then run matching and notify the top-ranked organisation.
+        await notificationPublisher.NotifyAsync(
+            ActorType.HospitalityPartner,
+            offer.HospitalityPartnerId,
+            "Recurrent offer confirmed",
+            $"Your recurrent offer #{offer.Id} has been confirmed and is now active. Matching has started.",
+            cancellationToken,
+            NotificationType.MatchingOffer);
+
         await NotifyFirstMatchAsync(offer.Id, cancellationToken);
         return NoContent();
     }
@@ -485,11 +491,70 @@ public class FoodOffersController(
     }
 
     /// <summary>
-    /// Runs or retrieves the matching list for a food offer.
-    ///
-    /// Fix 5: the endpoint is now accessible by CharityOrganization as well. An organization
-    /// can only see their own entry in the ranked list, not the full ranking of all competitors.
-    /// Admins and the owning hospitality partner see the full list.
+    /// Fix 4: GET returns the existing match list without any side-effects.
+    /// Admins and the owning partner see the full ranked list.
+    /// A charity organization sees only their own match entry.
+    /// POST triggers matching (or retrieves if already run) — preserved for backward compat.
+    /// </summary>
+    [Authorize]
+    [HttpGet("{id}/match")]
+    public ActionResult GetMatch(int id, CancellationToken cancellationToken)
+    {
+        var offer = unitOfWork.FoodOffers.Query().FirstOrDefault(o => o.Id == id);
+        if (offer is null)
+        {
+            return NotFound();
+        }
+
+        var isAdmin = User.IsAdministrator();
+        var isOwnerPartner = User.HospitalityPartnerId() == offer.HospitalityPartnerId;
+        var callerOrgId = User.CharityOrganizationId();
+
+        if (!isAdmin && !isOwnerPartner && callerOrgId is null)
+        {
+            return Forbid();
+        }
+
+        if (!isAdmin && !isOwnerPartner && callerOrgId.HasValue)
+        {
+            // Charity org: return only their own match entry (read-only, no side-effects).
+            var orgMatch = unitOfWork.OfferMatches.Query()
+                .Where(m => m.FoodOfferId == id && m.CharityOrganizationId == callerOrgId.Value)
+                .OrderBy(m => m.Rank)
+                .FirstOrDefault();
+
+            if (orgMatch is null)
+            {
+                return NotFound(new { message = "Your organization is not in the match list for this offer." });
+            }
+
+            return Ok(new[]
+            {
+                new
+                {
+                    orgMatch.FoodOfferId,
+                    orgMatch.CharityOrganizationId,
+                    orgMatch.Score,
+                    orgMatch.Rank,
+                    orgMatch.Decision,
+                    orgMatch.NotifiedAtUtc
+                }
+            });
+        }
+
+        // Admin or owning partner: return the full existing match list without triggering rematching.
+        var matches = unitOfWork.OfferMatches.Query()
+            .Where(m => m.FoodOfferId == id && m.Rank > 0)
+            .OrderBy(m => m.Rank)
+            .ToList();
+
+        return Ok(matches);
+    }
+
+    /// <summary>
+    /// POST triggers matching (generates the ranked list if not yet done, or re-fetches it)
+    /// and notifies the first organization. Accessible by admins, the owning partner,
+    /// or charity organizations (who only see their own entry).
     /// </summary>
     [Authorize]
     [HttpPost("{id}/match")]
@@ -501,8 +566,6 @@ public class FoodOffersController(
             return NotFound();
         }
 
-        // Fix 5: allow charity organizations to call this endpoint to see their own match entry.
-        // Non-admin / non-partner callers that are NOT a charity organization are forbidden.
         var isAdmin = User.IsAdministrator();
         var isOwnerPartner = User.HospitalityPartnerId() == offer.HospitalityPartnerId;
         var callerOrgId = User.CharityOrganizationId();
@@ -515,9 +578,7 @@ public class FoodOffersController(
 
         if (!isAdmin && !isOwnerPartner && isCharityOrg)
         {
-            // Organizations can only trigger matching if they are already in the match list.
-            // They cannot force a rematch of the offer. Return their own entry from the
-            // existing list (or 404 if they are not in it).
+            // Organizations can only view their own existing match entry.
             var existingOrgMatch = unitOfWork.OfferMatches.Query()
                 .Where(m => m.FoodOfferId == id && m.CharityOrganizationId == callerOrgId!.Value)
                 .OrderBy(m => m.Rank)

@@ -1,4 +1,5 @@
 using Bite4All.Application.DTOs.FoodOffers;
+using Bite4All.Domain.Enums;
 using FluentValidation;
 
 namespace Bite4All.API.Validators;
@@ -14,6 +15,11 @@ public class CreateFoodOfferRequestValidator : AbstractValidator<CreateFoodOffer
         RuleFor(r => r.TotalQuantityKg)
             .GreaterThan(0)
             .WithMessage("Total quantity must be greater than zero.");
+
+        // Fix 13: FoodCategory enum starts at 1 — reject default 0 value.
+        RuleFor(r => r.Category)
+            .Must(c => Enum.IsDefined(typeof(FoodCategory), c) && c != 0)
+            .WithMessage("A valid food category is required.");
 
         RuleFor(r => r.PickupWindowEndUtc)
             .GreaterThan(r => r.PickupWindowStartUtc)

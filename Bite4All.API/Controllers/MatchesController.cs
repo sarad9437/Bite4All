@@ -1,5 +1,6 @@
 using Bite4All.API.Authorization;
 using Bite4All.API.Hubs;
+using Bite4All.Application.DTOs.Common;
 using Bite4All.Domain.Entities;
 using Bite4All.Domain.Enums;
 using Bite4All.Domain.Repositories;
@@ -13,6 +14,94 @@ namespace Bite4All.API.Controllers;
 [Route("matches")]
 public class MatchesController(IUnitOfWork unitOfWork, INotificationPublisher notificationPublisher) : ControllerBase
 {
+    /// <summary>
+    /// Fix 3: returns a paginated list of offer matches for the currently authenticated
+    /// charity organization (or any organization when called by an admin).
+    /// Supports optional filtering by decision and date range.
+    /// Skipped matches (SkippedByBlock, SkippedByCapacity, SkippedByDiet) are excluded
+    /// by default unless the caller explicitly asks for them via includeSkipped=true.
+    /// </summary>
+    [HttpGet("my")]
+    public ActionResult<PagedResult<OfferMatch>> GetMine(
+        [FromQuery] MatchDecision? decision = null,
+        [FromQuery] bool includeSkipped = false,
+        [FromQuery] int? organizationId = null,
+        [FromQuery] DateTime? fromUtc = null,
+        [FromQuery] DateTime? toUtc = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        int resolvedOrgId;
+
+        if (User.IsAdministrator())
+        {
+            if (organizationId is null or <= 0)
+            {
+                return BadRequest(new { message = "Administrators must supply organizationId." });
+            }
+            resolvedOrgId = organizationId.Value;
+        }
+        else
+        {
+            var callerOrgId = User.CharityOrganizationId();
+            if (callerOrgId is null)
+            {
+                return Forbid();
+            }
+            resolvedOrgId = callerOrgId.Value;
+        }
+
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var skippedDecisions = new[]
+        {
+            MatchDecision.SkippedByBlock,
+            MatchDecision.SkippedByCapacity,
+            MatchDecision.SkippedByDiet
+        };
+
+        var query = unitOfWork.OfferMatches.Query()
+            .Where(m => m.CharityOrganizationId == resolvedOrgId);
+
+        if (!includeSkipped)
+        {
+            query = query.Where(m => !skippedDecisions.Contains(m.Decision));
+        }
+
+        if (decision.HasValue)
+        {
+            query = query.Where(m => m.Decision == decision.Value);
+        }
+
+        if (fromUtc.HasValue)
+        {
+            query = query.Where(m => m.CreatedAtUtc >= fromUtc.Value);
+        }
+
+        if (toUtc.HasValue)
+        {
+            query = query.Where(m => m.CreatedAtUtc <= toUtc.Value);
+        }
+
+        var totalCount = query.Count();
+
+        var items = query
+            .OrderByDescending(m => m.CreatedAtUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<OfferMatch>
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
+    }
+
     [HttpPost("{matchId}/accept")]
     public async Task<IActionResult> Accept(int matchId, CancellationToken cancellationToken)
     {

@@ -12,6 +12,9 @@ namespace Bite4All.API.Controllers;
 [Route("blocks")]
 public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
 {
+    /// <summary>
+    /// Admin: returns all block relations in the system.
+    /// </summary>
     [HttpGet]
     public async Task<ActionResult<List<BlockRelation>>> GetAll(CancellationToken cancellationToken)
     {
@@ -21,6 +24,43 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
         }
 
         return Ok(unitOfWork.BlockRelations.Query().ToList());
+    }
+
+    /// <summary>
+    /// Fix 2: returns block relations involving the currently authenticated actor
+    /// (hospitality partner or charity organization). Each side can see the blocks
+    /// they initiated as well as blocks the other party placed on them.
+    /// </summary>
+    [HttpGet("my")]
+    public ActionResult<List<BlockRelation>> GetMine(CancellationToken cancellationToken)
+    {
+        var partnerId = User.HospitalityPartnerId();
+        var orgId = User.CharityOrganizationId();
+
+        if (!User.IsAdministrator() && partnerId is null && orgId is null)
+        {
+            return Forbid();
+        }
+
+        IQueryable<BlockRelation> query = unitOfWork.BlockRelations.Query();
+
+        if (partnerId.HasValue && orgId.HasValue)
+        {
+            // Edge case: user somehow has both — show all blocks for either
+            query = query.Where(b =>
+                b.HospitalityPartnerId == partnerId.Value ||
+                b.CharityOrganizationId == orgId.Value);
+        }
+        else if (partnerId.HasValue)
+        {
+            query = query.Where(b => b.HospitalityPartnerId == partnerId.Value);
+        }
+        else if (orgId.HasValue)
+        {
+            query = query.Where(b => b.CharityOrganizationId == orgId.Value);
+        }
+
+        return Ok(query.ToList());
     }
 
     [HttpPost]

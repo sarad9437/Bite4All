@@ -82,7 +82,7 @@ public class PickupsController(
 
     /// <summary>
     /// Returns pickups for a driver.
-    /// Use ?activeOnly=true to get only in-progress tasks (Created, Assigned, DriverConfirmed, PickedUp, ProblemReported).
+    /// Use ?activeOnly=true to get only in-progress tasks.
     /// </summary>
     [Authorize(Roles = "Driver,Administrator")]
     [HttpGet("driver/{driverId:int}")]
@@ -253,9 +253,13 @@ public class PickupsController(
             return BadRequest(new { message = "Pickup document already exists for this accepted match." });
         }
 
+        // Fix 11: use Guid for the suffix to avoid the 100 000-value collision window that
+        // Ticks % 100000 gives. The DB unique index catches any residual duplicates with a
+        // 409 rather than a 500.
+        var docSuffix = Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
         var document = new PickupDocument
         {
-            DocumentNumber = $"PR-{DateTime.UtcNow:yyyy}-{DateTime.UtcNow.Ticks % 100000:D5}",
+            DocumentNumber = $"PR-{DateTime.UtcNow:yyyy}-{docSuffix}",
             FoodOfferId = match.FoodOfferId,
             HospitalityPartnerId = match.FoodOffer.HospitalityPartnerId,
             CharityOrganizationId = match.CharityOrganizationId,
@@ -266,8 +270,6 @@ public class PickupsController(
         await unitOfWork.PickupDocuments.AddAsync(document, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // Fix 1: notify the hospitality partner that a pickup document has been created
-        // and a driver will be assigned soon, so they can prepare the food.
         await notificationPublisher.NotifyAsync(
             ActorType.HospitalityPartner,
             match.FoodOffer.HospitalityPartnerId,
@@ -565,6 +567,8 @@ public class PickupsController(
             return NotFound();
         }
 
+        // Fix 14: verify the driver belongs to the organization that owns this pickup,
+        // preventing a driver from updating location on pickups they are not part of.
         if (!User.IsAdministrator() && pickup.Driver.CharityOrganizationId != pickup.CharityOrganizationId)
         {
             return Forbid();
@@ -586,6 +590,7 @@ public class PickupsController(
             updatedAtUtc = pickup.Driver.LocationUpdatedAtUtc
         };
 
+        // Fix 14: only broadcast to the parties directly involved in this pickup.
         await hubContext.Clients.Group($"{ActorType.CharityOrganization}:{pickup.CharityOrganizationId}")
             .SendAsync("driver-location", payload, cancellationToken);
         await hubContext.Clients.Group($"{ActorType.Driver}:{pickup.DriverId.Value}")
@@ -717,6 +722,47 @@ public class PickupsController(
                 }
             }
         }
+        else if (request.IssueType == PickupIssueType.QuantityMismatch)
+        {
+            // Fix 5: QuantityMismatch — the partner declared fewer kilograms than agreed in the
+            // offer. Penalise the partner lightly (no cancellation count, just a small reputation
+            // hit) and notify the admin so they can investigate. The pickup stays in
+            // ProblemReported; the organization must resolve it via PUT /{id}/resolve-issue
+            // (continue with whatever quantity is available, or cancel).
+            var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
+            if (partner is not null)
+            {
+                partner.ReputationScore = Math.Max(1, Math.Round(partner.ReputationScore - 0.1, 2));
+                await unitOfWork.ReputationSnapshots.AddAsync(new ReputationSnapshot
+                {
+                    ActorType = ActorType.HospitalityPartner,
+                    ActorId = partner.Id,
+                    Score = partner.ReputationScore,
+                    Source = "Quantity mismatch"
+                }, cancellationToken);
+            }
+
+            await notificationPublisher.NotifyAsync(
+                ActorType.Administrator,
+                0,
+                "Quantity mismatch reported",
+                $"Driver reported a quantity mismatch on pickup {pickup.DocumentNumber}. Note: {request.Note}",
+                cancellationToken,
+                NotificationType.AdminMessage);
+        }
+        // Fix 5: PickupIssueType.Other — no automatic penalties. The pickup is placed in
+        // ProblemReported and the admin is notified so a human can assess the situation.
+        // The organization resolves it via PUT /{id}/resolve-issue.
+        else if (request.IssueType == PickupIssueType.Other)
+        {
+            await notificationPublisher.NotifyAsync(
+                ActorType.Administrator,
+                0,
+                "Pickup issue reported",
+                $"A general issue was reported on pickup {pickup.DocumentNumber}. Note: {request.Note}",
+                cancellationToken,
+                NotificationType.AdminMessage);
+        }
 
         await unitOfWork.PickupIssues.AddAsync(issue, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
@@ -726,15 +772,6 @@ public class PickupsController(
 
     /// <summary>
     /// Resolves a previously reported issue on a pickup, returning it to an actionable status.
-    ///
-    /// An admin or the organization can resolve an issue in one of two ways:
-    /// — "continue" resumes the pickup at the appropriate status (DriverConfirmed if a driver
-    ///   is still assigned, Created otherwise) so the pickup can proceed normally.
-    /// — "cancel" closes the pickup as Cancelled, releasing driver/vehicle and notifying
-    ///   the hospitality partner.
-    ///
-    /// This gives ProblemReported a clear, deterministic exit path instead of leaving it
-    /// permanently stuck.
     /// </summary>
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPut("{id}/resolve-issue")]
@@ -758,7 +795,6 @@ public class PickupsController(
 
         if (request.Cancel)
         {
-            // Treat as organisation-side cancellation — release driver/vehicle, notify partner.
             pickup.Status = PickupStatus.Cancelled;
 
             if (pickup.DriverId.HasValue)
@@ -790,7 +826,6 @@ public class PickupsController(
         }
         else
         {
-            // Resume: go back to DriverConfirmed if a driver is still assigned, otherwise Created.
             pickup.Status = pickup.DriverId.HasValue ? PickupStatus.DriverConfirmed : PickupStatus.Created;
             await unitOfWork.SaveChangesAsync(cancellationToken);
             await notificationPublisher.NotifyAsync(
@@ -816,16 +851,6 @@ public class PickupsController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Cancels a pickup on behalf of the charity organization.
-    ///
-    /// Fix 7: ProblemReported is excluded from the allowed statuses. Pickups in
-    /// ProblemReported must go through PUT /{id}/resolve-issue which has explicit
-    /// cancel/resume logic and does NOT charge a reputation penalty (the issue was
-    /// caused by the partner or driver, not the organisation). Using cancel-by-organization
-    /// from ProblemReported would incorrectly penalise the organisation's reputation and
-    /// bypass the structured issue-resolution path.
-    /// </summary>
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPut("{id}/cancel-by-organization")]
     public async Task<IActionResult> CancelByOrganization(int id, CancelPickupRequest request, CancellationToken cancellationToken)
@@ -841,7 +866,6 @@ public class PickupsController(
             return Forbid();
         }
 
-        // Fix 7: ProblemReported is now explicitly blocked here — use PUT /{id}/resolve-issue instead.
         if (pickup.Status is PickupStatus.PickedUp
                           or PickupStatus.DeliveredToOrganization
                           or PickupStatus.Cancelled

@@ -10,7 +10,10 @@ namespace Bite4All.API.Controllers;
 
 [ApiController]
 [Route("auth")]
-public class AuthController(UserManager<ApplicationUser> userManager, IJwtTokenService jwtTokenService, IUnitOfWork unitOfWork) : ControllerBase
+public class AuthController(
+    UserManager<ApplicationUser> userManager,
+    IJwtTokenService jwtTokenService,
+    IUnitOfWork unitOfWork) : ControllerBase
 {
     [HttpPost("login")]
     public async Task<ActionResult<AuthResponse>> Login(LoginRequest request)
@@ -24,7 +27,24 @@ public class AuthController(UserManager<ApplicationUser> userManager, IJwtTokenS
         if (user.ActorType == ActorType.HospitalityPartner)
         {
             var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(user.HospitalityPartnerId ?? 0);
-            if (partner is null || partner.ApprovalStatus != ApprovalStatus.Approved)
+            if (partner is null)
+            {
+                return Unauthorized(new { message = "Your account is unavailable." });
+            }
+
+            // Fix 6: distinguish Suspended from Rejected/Pending so the user gets a
+            // meaningful message instead of the generic "waiting for approval".
+            if (partner.ApprovalStatus == ApprovalStatus.Suspended)
+            {
+                return Unauthorized(new
+                {
+                    message = string.IsNullOrWhiteSpace(partner.RejectionReason)
+                        ? "Your account has been suspended. Please contact the platform administrator."
+                        : $"Your account has been suspended: {partner.RejectionReason}"
+                });
+            }
+
+            if (partner.ApprovalStatus != ApprovalStatus.Approved)
             {
                 return Unauthorized(new { message = "Your account is waiting for approval." });
             }
@@ -32,7 +52,23 @@ public class AuthController(UserManager<ApplicationUser> userManager, IJwtTokenS
         else if (user.ActorType == ActorType.CharityOrganization)
         {
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(user.CharityOrganizationId ?? 0);
-            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            if (organization is null)
+            {
+                return Unauthorized(new { message = "Your account is unavailable." });
+            }
+
+            // Fix 6: distinguish Suspended from Rejected/Pending.
+            if (organization.ApprovalStatus == ApprovalStatus.Suspended)
+            {
+                return Unauthorized(new
+                {
+                    message = string.IsNullOrWhiteSpace(organization.RejectionReason)
+                        ? "Your account has been suspended. Please contact the platform administrator."
+                        : $"Your account has been suspended: {organization.RejectionReason}"
+                });
+            }
+
+            if (organization.ApprovalStatus != ApprovalStatus.Approved)
             {
                 return Unauthorized(new { message = "Your account is waiting for approval." });
             }
@@ -46,7 +82,18 @@ public class AuthController(UserManager<ApplicationUser> userManager, IJwtTokenS
             }
 
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(driver.CharityOrganizationId);
-            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            if (organization is null)
+            {
+                return Unauthorized(new { message = "Your account is unavailable." });
+            }
+
+            // Fix 6: a driver whose organization is suspended cannot log in either.
+            if (organization.ApprovalStatus == ApprovalStatus.Suspended)
+            {
+                return Unauthorized(new { message = "Your organization's account has been suspended. Please contact the platform administrator." });
+            }
+
+            if (organization.ApprovalStatus != ApprovalStatus.Approved)
             {
                 return Unauthorized(new { message = "Your account is waiting for approval." });
             }

@@ -176,6 +176,133 @@ public class OnboardingController(
         return NoContent();
     }
 
+    /// <summary>
+    /// Fix 6: suspends an approved hospitality partner — blocks login and prevents
+    /// new offers while preserving all historical data. Admins should use this
+    /// for temporary bans rather than Rejected (which is permanent).
+    /// </summary>
+    [Authorize(Roles = "Administrator")]
+    [HttpPut("hospitality-partners/{id}/suspend")]
+    public async Task<IActionResult> SuspendPartner(int id, SuspendRequest request, CancellationToken cancellationToken)
+    {
+        var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(id, cancellationToken);
+        if (partner is null)
+        {
+            return NotFound();
+        }
+
+        if (partner.ApprovalStatus == ApprovalStatus.Suspended)
+        {
+            return BadRequest(new { message = "Partner is already suspended." });
+        }
+
+        partner.ApprovalStatus = ApprovalStatus.Suspended;
+        partner.RejectionReason = request.Reason;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        await notificationPublisher.NotifyAsync(
+            ActorType.HospitalityPartner,
+            partner.Id,
+            "Account suspended",
+            $"Your Bite4All account has been suspended: {request.Reason}",
+            cancellationToken,
+            NotificationType.RegistrationDecision);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Fix 6: reinstates a suspended hospitality partner. The account is moved back to
+    /// Approved so the partner can log in and create offers again.
+    /// </summary>
+    [Authorize(Roles = "Administrator")]
+    [HttpPut("hospitality-partners/{id}/unsuspend")]
+    public async Task<IActionResult> UnsuspendPartner(int id, CancellationToken cancellationToken)
+    {
+        var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(id, cancellationToken);
+        if (partner is null)
+        {
+            return NotFound();
+        }
+
+        if (partner.ApprovalStatus != ApprovalStatus.Suspended)
+        {
+            return BadRequest(new { message = "Partner is not suspended." });
+        }
+
+        partner.ApprovalStatus = ApprovalStatus.Approved;
+        partner.RejectionReason = null;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        await notificationPublisher.NotifyAsync(
+            ActorType.HospitalityPartner,
+            partner.Id,
+            "Account reinstated",
+            "Your Bite4All account has been reinstated. You can now log in and create offers again.",
+            cancellationToken,
+            NotificationType.RegistrationDecision);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Fix 6: suspends an approved charity organization.
+    /// </summary>
+    [Authorize(Roles = "Administrator")]
+    [HttpPut("organizations/{id}/suspend")]
+    public async Task<IActionResult> SuspendOrganization(int id, SuspendRequest request, CancellationToken cancellationToken)
+    {
+        var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(id, cancellationToken);
+        if (organization is null)
+        {
+            return NotFound();
+        }
+
+        if (organization.ApprovalStatus == ApprovalStatus.Suspended)
+        {
+            return BadRequest(new { message = "Organization is already suspended." });
+        }
+
+        organization.ApprovalStatus = ApprovalStatus.Suspended;
+        organization.RejectionReason = request.Reason;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        await notificationPublisher.NotifyAsync(
+            ActorType.CharityOrganization,
+            organization.Id,
+            "Account suspended",
+            $"Your Bite4All organization account has been suspended: {request.Reason}",
+            cancellationToken,
+            NotificationType.RegistrationDecision);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Fix 6: reinstates a suspended charity organization.
+    /// </summary>
+    [Authorize(Roles = "Administrator")]
+    [HttpPut("organizations/{id}/unsuspend")]
+    public async Task<IActionResult> UnsuspendOrganization(int id, CancellationToken cancellationToken)
+    {
+        var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(id, cancellationToken);
+        if (organization is null)
+        {
+            return NotFound();
+        }
+
+        if (organization.ApprovalStatus != ApprovalStatus.Suspended)
+        {
+            return BadRequest(new { message = "Organization is not suspended." });
+        }
+
+        organization.ApprovalStatus = ApprovalStatus.Approved;
+        organization.RejectionReason = null;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        await notificationPublisher.NotifyAsync(
+            ActorType.CharityOrganization,
+            organization.Id,
+            "Account reinstated",
+            "Your Bite4All organization account has been reinstated.",
+            cancellationToken,
+            NotificationType.RegistrationDecision);
+        return NoContent();
+    }
+
     private async Task<IdentityResult> CreateActorUserAsync(
         string email,
         string password,
