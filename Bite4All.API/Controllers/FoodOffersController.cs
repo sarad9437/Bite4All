@@ -128,7 +128,6 @@ public class FoodOffersController(
             return Forbid();
         }
 
-        // Validate update fields when provided
         var errors = updateValidator.Validate(request);
         if (!errors.IsValid)
         {
@@ -298,6 +297,11 @@ public class FoodOffersController(
         return CreatedAtAction(nameof(GetRecurrentById), new { id = recurrent.Id }, recurrent);
     }
 
+    /// <summary>
+    /// Manually materializes today's offer for a recurrent donation schedule.
+    /// Fix: guards against duplicate creation — the same schedule cannot produce more
+    /// than one offer per calendar day, whether triggered by the scheduler or manually.
+    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPost("recurrent/{id}/materialize-today")]
     public async Task<ActionResult<FoodOfferDto>> MaterializeRecurrentToday(int id, CancellationToken cancellationToken)
@@ -327,6 +331,20 @@ public class FoodOffersController(
         if (!User.IsAdministrator() && partner.ApprovalStatus != ApprovalStatus.Approved)
         {
             return Forbid();
+        }
+
+        // Fix: prevent duplicate — the scheduler and this endpoint must not both produce
+        // an offer for the same recurrent donation on the same calendar day.
+        var todayUtc = DateTime.UtcNow.Date;
+        var alreadyCreatedToday = unitOfWork.FoodOffers.Query().Any(o =>
+            o.CreatedFromRecurrentDonation &&
+            o.HospitalityPartnerId == recurrent.HospitalityPartnerId &&
+            o.RecurrentDonationId == recurrent.Id &&
+            o.CreatedAtUtc.Date == todayUtc);
+
+        if (alreadyCreatedToday)
+        {
+            return Conflict(new { message = "A recurrent offer for this schedule has already been created today." });
         }
 
         var today = DateTime.UtcNow.Date;
@@ -384,6 +402,40 @@ public class FoodOffersController(
         }
 
         return await sender.Send(new PauseRecurrentDonationCommand(id), cancellationToken)
+            ? NoContent()
+            : NotFound();
+    }
+
+    /// <summary>
+    /// Resumes a previously paused recurrent donation schedule.
+    /// The scheduler will pick it up on its next tick and create offers going forward.
+    /// </summary>
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpPut("recurrent/{id}/resume")]
+    public async Task<IActionResult> ResumeRecurrent(int id, CancellationToken cancellationToken)
+    {
+        var recurrent = await unitOfWork.RecurrentDonations.GetByIdAsync(id, cancellationToken);
+        if (recurrent is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.HospitalityPartnerId() != recurrent.HospitalityPartnerId)
+        {
+            return Forbid();
+        }
+
+        if (recurrent.Status == RecurrentDonationStatus.Cancelled)
+        {
+            return BadRequest(new { message = "Cancelled recurrent donations cannot be resumed." });
+        }
+
+        if (recurrent.Status != RecurrentDonationStatus.Paused)
+        {
+            return BadRequest(new { message = "Only paused recurrent donations can be resumed." });
+        }
+
+        return await sender.Send(new ResumeRecurrentDonationCommand(id), cancellationToken)
             ? NoContent()
             : NotFound();
     }
@@ -718,7 +770,6 @@ public class FoodOffersController(
         var acceptedMatch = offer.Matches.FirstOrDefault(m => m.Decision == MatchDecision.Accepted);
         if (acceptedMatch is not null)
         {
-            // Cancel any active pickup for this match
             var activePickup = unitOfWork.PickupDocuments.Query()
                 .FirstOrDefault(p =>
                     p.FoodOfferId == offer.Id &&
@@ -731,7 +782,6 @@ public class FoodOffersController(
             {
                 activePickup.Status = PickupStatus.Cancelled;
 
-                // Release driver and vehicle if assigned
                 if (activePickup.DriverId.HasValue)
                 {
                     var driver = await unitOfWork.Drivers.GetByIdAsync(activePickup.DriverId.Value, cancellationToken);
@@ -751,13 +801,8 @@ public class FoodOffersController(
                 }
             }
 
-            // Fix #2: the accepted match must itself be marked Cancelled here. Previously,
-            // when there was no PickupDocument yet (the organization accepted the match but
-            // hadn't created the pickup document via POST /pickups/from-match/{matchId}),
-            // the match stayed in the `Accepted` state forever even though the underlying
-            // offer was cancelled. That allowed PickupsController.CreateFromMatch to later
-            // succeed in creating a pickup document for an offer that no longer exists in
-            // an active state — food that was never actually going to be delivered.
+            // Fix #2: mark the accepted match as Cancelled so no pickup document can be
+            // created against this offer after cancellation.
             acceptedMatch.Decision = MatchDecision.Cancelled;
             acceptedMatch.DecisionNote = "Offer was cancelled by the hospitality partner.";
             acceptedMatch.RespondedAtUtc = DateTime.UtcNow;
