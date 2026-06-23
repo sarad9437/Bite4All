@@ -51,10 +51,9 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 continue;
             }
 
-            // Fix: check whether this specific recurrent donation (not any from the partner) already
-            // produced an offer today. The old code keyed only on HospitalityPartnerId, which meant
-            // that a partner with two separate recurrent schedules would have the second one silently
-            // skipped every day after the first one ran.
+            // Check whether this specific recurrent donation already produced an offer today.
+            // Key on both HospitalityPartnerId and RecurrentDonationId so a partner with
+            // multiple schedules doesn't have the second one silently skipped.
             var alreadyCreatedToday = unitOfWork.FoodOffers.Query().Any(o =>
                 o.CreatedFromRecurrentDonation &&
                 o.HospitalityPartnerId == recurrent.HospitalityPartnerId &&

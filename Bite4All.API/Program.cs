@@ -78,7 +78,11 @@ builder.Services.AddScoped<IMatchingService, MatchingService>();
 builder.Services.AddScoped<IImpactReportService, ImpactReportService>();
 builder.Services.AddScoped<IFoodOfferService, FoodOfferService>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+
+// Register all validators from the API assembly (CreateFoodOfferRequestValidator,
+// UpdateFoodOfferRequestValidator, AssignPickupRequestValidator, etc.)
 builder.Services.AddValidatorsFromAssemblyContaining<CreateFoodOfferRequestValidator>();
+
 builder.Services.AddScoped<Bite4All.API.Hubs.INotificationPublisher, SignalRNotificationPublisher>();
 builder.Services.AddHostedService<RecurrentDonationScheduler>();
 

@@ -32,7 +32,6 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
             PickupWindowStartUtc = request.PickupWindowStartUtc,
             PickupWindowEndUtc = request.PickupWindowEndUtc,
             ExpiresAtUtc = request.ExpiresAtUtc,
-            // Fix: copy MatchResponseWindowMinutes from request instead of always using entity default (30).
             MatchResponseWindowMinutes = request.MatchResponseWindowMinutes > 0 ? request.MatchResponseWindowMinutes : 30,
             Note = request.Note,
             PhotoUrl = request.PhotoUrl,
@@ -169,14 +168,20 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
             offer.ExpiresAtUtc = request.ExpiresAtUtc.Value;
         }
 
-        // Fix: apply MatchResponseWindowMinutes when provided in an update request.
         if (request.MatchResponseWindowMinutes.HasValue && request.MatchResponseWindowMinutes.Value > 0)
         {
             offer.MatchResponseWindowMinutes = request.MatchResponseWindowMinutes.Value;
         }
 
-        offer.Note = request.Note ?? offer.Note;
-        offer.PhotoUrl = request.PhotoUrl ?? offer.PhotoUrl;
+        if (request.Note is not null)
+        {
+            offer.Note = request.Note;
+        }
+
+        if (request.PhotoUrl is not null)
+        {
+            offer.PhotoUrl = request.PhotoUrl;
+        }
 
         await unitOfWork.SaveChangesAsync(cancellationToken);
         LoadDetails(offer);
@@ -204,6 +209,8 @@ public class FoodOfferService(IUnitOfWork unitOfWork) : IFoodOfferService
             PickupWindowStartUtc = offer.PickupWindowStartUtc,
             PickupWindowEndUtc = offer.PickupWindowEndUtc,
             ExpiresAtUtc = offer.ExpiresAtUtc,
+            MatchResponseWindowMinutes = offer.MatchResponseWindowMinutes,
+            Note = offer.Note,
             PhotoUrl = offer.PhotoUrl,
             Items = offer.Items.Select(i => new FoodOfferItemDto
             {

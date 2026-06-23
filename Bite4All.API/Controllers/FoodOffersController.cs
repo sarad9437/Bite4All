@@ -19,6 +19,7 @@ namespace Bite4All.API.Controllers;
 public class FoodOffersController(
     IFoodOfferService foodOfferService,
     IValidator<CreateFoodOfferRequest> createValidator,
+    IValidator<UpdateFoodOfferRequest> updateValidator,
     IMatchingService matchingService,
     Bite4All.API.Hubs.INotificationPublisher notificationPublisher,
     IUnitOfWork unitOfWork,
@@ -127,6 +128,13 @@ public class FoodOffersController(
             return Forbid();
         }
 
+        // Validate update fields when provided
+        var errors = updateValidator.Validate(request);
+        if (!errors.IsValid)
+        {
+            return BadRequest(errors.Errors.Select(e => new { e.PropertyName, e.ErrorMessage }));
+        }
+
         try
         {
             return Ok(await foodOfferService.UpdateAsync(id, request, cancellationToken));
@@ -193,8 +201,14 @@ public class FoodOffersController(
 
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpGet("recurrent")]
-    public ActionResult<List<RecurrentDonation>> GetRecurrent(CancellationToken cancellationToken)
+    public ActionResult<List<RecurrentDonation>> GetRecurrent(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
     {
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
         IQueryable<RecurrentDonation> query = unitOfWork.RecurrentDonations.Query();
 
         if (!User.IsAdministrator())
@@ -207,7 +221,21 @@ public class FoodOffersController(
             query = query.Where(r => r.HospitalityPartnerId == partnerId.Value);
         }
 
-        return Ok(query.OrderByDescending(r => r.CreatedAtUtc).ToList());
+        var totalCount = query.Count();
+        var items = query
+            .OrderByDescending(r => r.CreatedAtUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount,
+            TotalPages = pageSize == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize)
+        });
     }
 
     [Authorize(Roles = "HospitalityPartner,Administrator")]
@@ -414,8 +442,6 @@ public class FoodOffersController(
         offer.Status = FoodOfferStatus.Active;
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // Fix 10: notify the owning partner that their recurrent offer is now active,
-        // then run matching and notify the top-ranked organisation.
         await notificationPublisher.NotifyAsync(
             ActorType.HospitalityPartner,
             offer.HospitalityPartnerId,
@@ -490,12 +516,6 @@ public class FoodOffersController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Fix 4: GET returns the existing match list without any side-effects.
-    /// Admins and the owning partner see the full ranked list.
-    /// A charity organization sees only their own match entry.
-    /// POST triggers matching (or retrieves if already run) — preserved for backward compat.
-    /// </summary>
     [Authorize]
     [HttpGet("{id}/match")]
     public ActionResult GetMatch(int id, CancellationToken cancellationToken)
@@ -517,7 +537,6 @@ public class FoodOffersController(
 
         if (!isAdmin && !isOwnerPartner && callerOrgId.HasValue)
         {
-            // Charity org: return only their own match entry (read-only, no side-effects).
             var orgMatch = unitOfWork.OfferMatches.Query()
                 .Where(m => m.FoodOfferId == id && m.CharityOrganizationId == callerOrgId.Value)
                 .OrderBy(m => m.Rank)
@@ -542,7 +561,6 @@ public class FoodOffersController(
             });
         }
 
-        // Admin or owning partner: return the full existing match list without triggering rematching.
         var matches = unitOfWork.OfferMatches.Query()
             .Where(m => m.FoodOfferId == id && m.Rank > 0)
             .OrderBy(m => m.Rank)
@@ -551,11 +569,6 @@ public class FoodOffersController(
         return Ok(matches);
     }
 
-    /// <summary>
-    /// POST triggers matching (generates the ranked list if not yet done, or re-fetches it)
-    /// and notifies the first organization. Accessible by admins, the owning partner,
-    /// or charity organizations (who only see their own entry).
-    /// </summary>
     [Authorize]
     [HttpPost("{id}/match")]
     public async Task<ActionResult> Match(int id, CancellationToken cancellationToken)
@@ -578,7 +591,6 @@ public class FoodOffersController(
 
         if (!isAdmin && !isOwnerPartner && isCharityOrg)
         {
-            // Organizations can only view their own existing match entry.
             var existingOrgMatch = unitOfWork.OfferMatches.Query()
                 .Where(m => m.FoodOfferId == id && m.CharityOrganizationId == callerOrgId!.Value)
                 .OrderBy(m => m.Rank)
@@ -603,7 +615,6 @@ public class FoodOffersController(
             });
         }
 
-        // Admin or owning partner path — full match generation / retrieval.
         if (offer.Status is not (FoodOfferStatus.Active or FoodOfferStatus.PublicFallback))
         {
             return BadRequest(new { message = "Matching is available only for active offers." });
@@ -707,6 +718,39 @@ public class FoodOffersController(
         var acceptedMatch = offer.Matches.FirstOrDefault(m => m.Decision == MatchDecision.Accepted);
         if (acceptedMatch is not null)
         {
+            // Cancel any active pickup for this match
+            var activePickup = unitOfWork.PickupDocuments.Query()
+                .FirstOrDefault(p =>
+                    p.FoodOfferId == offer.Id &&
+                    p.CharityOrganizationId == acceptedMatch.CharityOrganizationId &&
+                    p.Status != PickupStatus.Cancelled &&
+                    p.Status != PickupStatus.PickedUp &&
+                    p.Status != PickupStatus.DeliveredToOrganization);
+
+            if (activePickup is not null)
+            {
+                activePickup.Status = PickupStatus.Cancelled;
+
+                // Release driver and vehicle if assigned
+                if (activePickup.DriverId.HasValue)
+                {
+                    var driver = await unitOfWork.Drivers.GetByIdAsync(activePickup.DriverId.Value, cancellationToken);
+                    if (driver is not null)
+                    {
+                        driver.IsAvailable = true;
+                    }
+                }
+
+                if (activePickup.VehicleId.HasValue)
+                {
+                    var vehicle = await unitOfWork.Vehicles.GetByIdAsync(activePickup.VehicleId.Value, cancellationToken);
+                    if (vehicle is not null)
+                    {
+                        vehicle.IsAvailable = true;
+                    }
+                }
+            }
+
             var acceptedOrganization = await unitOfWork.CharityOrganizations.GetByIdAsync(acceptedMatch.CharityOrganizationId, cancellationToken);
             if (acceptedOrganization is not null)
             {
