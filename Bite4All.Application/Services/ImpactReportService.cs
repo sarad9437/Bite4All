@@ -41,9 +41,6 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
 
         var totalKg = pickupList.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg);
 
-        // Fix: apply the same date range to UniqueRecipientsHelped so the admin impact report is
-        // internally consistent. The old code always counted all-time distributions regardless of
-        // the fromUtc/toUtc window supplied by the caller.
         var distributionsQuery = unitOfWork.RecipientMealDistributions.Query();
         if (fromUtc.HasValue)
         {
@@ -168,9 +165,23 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
         }
 
         var totalKg = pickups.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg);
-        var distributions = unitOfWork.RecipientMealDistributions.Query()
-            .Where(d => d.CharityOrganizationId == charityOrganizationId)
-            .ToList();
+
+        // Fix: apply the same date range to distributions so the organization impact report
+        // is internally consistent — when the caller filters by period, meals and recipients
+        // must also reflect only that period, not all-time totals.
+        var distributionsQuery = unitOfWork.RecipientMealDistributions.Query()
+            .Where(d => d.CharityOrganizationId == charityOrganizationId);
+
+        if (fromUtc.HasValue)
+        {
+            distributionsQuery = distributionsQuery.Where(d => d.DistributedAtUtc >= fromUtc.Value);
+        }
+        if (toUtc.HasValue)
+        {
+            distributionsQuery = distributionsQuery.Where(d => d.DistributedAtUtc <= toUtc.Value);
+        }
+
+        var distributions = distributionsQuery.ToList();
         var recordedMeals = distributions.Sum(d => d.MealsCount);
 
         return new OrganizationImpactReportDto

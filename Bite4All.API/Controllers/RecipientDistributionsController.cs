@@ -49,6 +49,18 @@ public class RecipientDistributionsController(IUnitOfWork unitOfWork) : Controll
             return Forbid();
         }
 
+        // Fix: prevent duplicate distribution records for the same (pickup, recipient) pair.
+        // The same meal should not be recorded twice for the same person on the same pickup —
+        // this would inflate MealsReceivedCount and reporting figures.
+        var alreadyRecorded = unitOfWork.RecipientMealDistributions.Query().Any(d =>
+            d.PickupDocumentId == request.PickupDocumentId &&
+            d.RecipientId == request.RecipientId);
+
+        if (alreadyRecorded)
+        {
+            return Conflict(new { message = "A meal distribution for this recipient and pickup has already been recorded." });
+        }
+
         var distribution = new RecipientMealDistribution
         {
             PickupDocumentId = pickup.Id,
