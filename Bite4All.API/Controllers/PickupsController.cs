@@ -442,9 +442,13 @@ public class PickupsController(
         pickup.DriverNote = request.DriverNote;
         pickup.PickedUpAtUtc = DateTime.UtcNow;
         pickup.Status = PickupStatus.PickedUp;
+
+        // Fix: food offer is marked Completed when the driver physically picks up the food from
+        // the restaurant — that is the moment the restaurant's obligation ends. Partner impact
+        // statistics (SuccessfulDonations, TotalDonatedKg) are updated at DeliverToOrganization
+        // when the donation is truly confirmed end-to-end, avoiding inflated counts in the rare
+        // case where a vehicle incident prevents delivery after pickup.
         pickup.FoodOffer.Status = FoodOfferStatus.Completed;
-        pickup.HospitalityPartner.TotalDonatedKg += request.ActualQuantityKg;
-        pickup.HospitalityPartner.SuccessfulDonations++;
 
         if (pickup.FoodOffer?.SpecialCampaignId is int specialCampaignId)
         {
@@ -503,6 +507,17 @@ public class PickupsController(
                 Score = pickup.CharityOrganization.ReputationScore,
                 Source = "Delivery received"
             }, cancellationToken);
+        }
+
+        // Fix: SuccessfulDonations and TotalDonatedKg are credited to the partner here, at actual
+        // delivery confirmation, not at PickedUp. A donation is only "successful" when the food
+        // reaches the organization. Moving it here prevents inflated statistics in edge cases where
+        // the driver picks up food but cannot complete the delivery.
+        pickup.HospitalityPartner ??= await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
+        if (pickup.HospitalityPartner is not null)
+        {
+            pickup.HospitalityPartner.TotalDonatedKg += pickup.ActualQuantityKg ?? pickup.PlannedQuantityKg;
+            pickup.HospitalityPartner.SuccessfulDonations++;
         }
 
         if (pickup.DriverId.HasValue)
@@ -676,9 +691,6 @@ public class PickupsController(
         else if (request.IssueType is PickupIssueType.DriverUnavailable or PickupIssueType.LateArrival)
         {
             // Organisation's fault — penalise organisation, no compensation bonus.
-            // Fix: previously this branch incorrectly granted a MatchCompensationBonus to the
-            // organisation even though it was their own driver/timing failure. The bonus exists
-            // solely to compensate victims of partner-side failures.
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
             if (organization is not null)
             {
@@ -886,11 +898,6 @@ public class PickupsController(
             var previousCancellationCount = organization.CancellationCount;
             organization.CancellationCount++;
             organization.ReputationScore = Math.Max(1, Math.Round(organization.ReputationScore - 0.2, 2));
-
-            // Fix: org-initiated cancellation — do NOT grant MatchCompensationBonus.
-            // The spec reserves the bonus for compensating organisations that are victims of
-            // partner failures. Granting it here would reward the cancelling party and
-            // undermine the deterrent effect of the reputation penalty.
 
             await unitOfWork.ReputationSnapshots.AddAsync(new ReputationSnapshot
             {

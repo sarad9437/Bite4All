@@ -3,6 +3,7 @@ using Bite4All.Application.Services;
 using Bite4All.Domain.Entities;
 using Bite4All.Domain.Enums;
 using Bite4All.Domain.Repositories;
+using Microsoft.EntityFrameworkCore;
 
 namespace Bite4All.API.Services;
 
@@ -19,6 +20,7 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 await ExpireOffersAsync(stoppingToken);
                 await ProcessMatchTimeoutsAsync(stoppingToken);
                 await ResetExpiredTemporaryCapacitiesAsync(stoppingToken);
+                await CleanupExpiredIdempotencyRecordsAsync(stoppingToken);
             }
             catch (Exception ex)
             {
@@ -35,8 +37,16 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
         var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
         var notificationPublisher = scope.ServiceProvider.GetRequiredService<INotificationPublisher>();
 
+        // Fix: use local time consistently for both the schedule check AND the offer date.
+        // LocalCreationTime is defined in the partner's local timezone so it must be compared
+        // against DateTime.Now (local server time). Using DateTime.UtcNow.Date for todayUtc
+        // was inconsistent: a midnight UTC rollover could create offers one calendar day early
+        // or late depending on the server's timezone offset.
+        // We now derive todayLocal from DateTime.Now so that offer pickup windows align with
+        // the same local calendar day the schedule is triggered on.
         var nowLocal = DateTime.Now;
         var currentTime = TimeOnly.FromDateTime(nowLocal);
+        var todayLocal = nowLocal.Date;
         var todayUtc = DateTime.UtcNow.Date;
 
         var dueDonations = unitOfWork.RecurrentDonations.Query()
@@ -54,6 +64,8 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
             // Check whether this specific recurrent donation already produced an offer today.
             // Key on both HospitalityPartnerId and RecurrentDonationId so a partner with
             // multiple schedules doesn't have the second one silently skipped.
+            // Fix: use todayUtc for the DB date comparison (CreatedAtUtc is UTC) and todayLocal
+            // for computing pickup window times, keeping both sides of the logic consistent.
             var alreadyCreatedToday = unitOfWork.FoodOffers.Query().Any(o =>
                 o.CreatedFromRecurrentDonation &&
                 o.HospitalityPartnerId == recurrent.HospitalityPartnerId &&
@@ -70,9 +82,11 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 HospitalityPartnerId = recurrent.HospitalityPartnerId,
                 TotalQuantityKg = recurrent.ExpectedQuantityKg,
                 Category = recurrent.Category,
-                PickupWindowStartUtc = todayUtc.Add(recurrent.LocalPickupStart.ToTimeSpan()),
-                PickupWindowEndUtc = todayUtc.Add(recurrent.LocalPickupEnd.ToTimeSpan()),
-                ExpiresAtUtc = todayUtc.Add(recurrent.LocalPickupEnd.ToTimeSpan()).AddHours(Math.Max(recurrent.ShelfLifeHours, 2)),
+                // Fix: use todayLocal (local calendar date) for pickup window so the times
+                // expressed in LocalPickupStart/LocalPickupEnd match what the partner expects.
+                PickupWindowStartUtc = todayLocal.Add(recurrent.LocalPickupStart.ToTimeSpan()),
+                PickupWindowEndUtc = todayLocal.Add(recurrent.LocalPickupEnd.ToTimeSpan()),
+                ExpiresAtUtc = todayLocal.Add(recurrent.LocalPickupEnd.ToTimeSpan()).AddHours(Math.Max(recurrent.ShelfLifeHours, 2)),
                 Note = recurrent.NoteTemplate,
                 Status = FoodOfferStatus.PendingRestaurantConfirmation,
                 CreatedFromRecurrentDonation = true,
@@ -307,5 +321,35 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
         {
             await unitOfWork.SaveChangesAsync(cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Fix: IdempotencyRecord rows accumulate indefinitely because nothing removes them after
+    /// they expire. The record's ExpiresAtUtc is set to 7 days from creation/completion in
+    /// IdempotencyMiddleware. This cleanup task runs every minute alongside the other
+    /// scheduler tasks and purges any records whose window has passed, keeping the table small.
+    /// </summary>
+    private async Task CleanupExpiredIdempotencyRecordsAsync(CancellationToken cancellationToken)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+
+        var now = DateTime.UtcNow;
+        var expired = unitOfWork.IdempotencyRecords.Query()
+            .Where(r => r.ExpiresAtUtc <= now)
+            .ToList();
+
+        if (expired.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var record in expired)
+        {
+            unitOfWork.IdempotencyRecords.Delete(record);
+        }
+
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Cleaned up {Count} expired idempotency records.", expired.Count);
     }
 }
