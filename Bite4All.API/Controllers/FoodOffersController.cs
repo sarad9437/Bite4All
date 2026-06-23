@@ -751,6 +751,17 @@ public class FoodOffersController(
                 }
             }
 
+            // Fix #2: the accepted match must itself be marked Cancelled here. Previously,
+            // when there was no PickupDocument yet (the organization accepted the match but
+            // hadn't created the pickup document via POST /pickups/from-match/{matchId}),
+            // the match stayed in the `Accepted` state forever even though the underlying
+            // offer was cancelled. That allowed PickupsController.CreateFromMatch to later
+            // succeed in creating a pickup document for an offer that no longer exists in
+            // an active state — food that was never actually going to be delivered.
+            acceptedMatch.Decision = MatchDecision.Cancelled;
+            acceptedMatch.DecisionNote = "Offer was cancelled by the hospitality partner.";
+            acceptedMatch.RespondedAtUtc = DateTime.UtcNow;
+
             var acceptedOrganization = await unitOfWork.CharityOrganizations.GetByIdAsync(acceptedMatch.CharityOrganizationId, cancellationToken);
             if (acceptedOrganization is not null)
             {

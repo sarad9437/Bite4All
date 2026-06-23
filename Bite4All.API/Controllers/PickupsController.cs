@@ -240,6 +240,17 @@ public class PickupsController(
             return Forbid();
         }
 
+        // Fix #2 (defense-in-depth): an Accepted match is only meaningful while its underlying
+        // offer is still in a state where delivery can actually happen. FoodOffersController.Cancel
+        // now flips the match's Decision away from Accepted as soon as the offer is cancelled, but
+        // we guard here too so a pickup document can never be created against a dead offer even if
+        // the match decision was left stale by some other path (e.g. direct data manipulation,
+        // future code paths that forget to update the match).
+        if (match.FoodOffer.Status is not (FoodOfferStatus.Reserved or FoodOfferStatus.Active or FoodOfferStatus.PublicFallback))
+        {
+            return BadRequest(new { message = "This offer is no longer available — it may have been cancelled, expired, or already completed." });
+        }
+
         var existingPickup = unitOfWork.PickupDocuments.Query().FirstOrDefault(p => p.FoodOfferId == match.FoodOfferId && p.CharityOrganizationId == match.CharityOrganizationId);
         if (existingPickup is not null)
         {
