@@ -48,9 +48,6 @@ public class PickupsController(
         return Ok(ToDto(pickup));
     }
 
-    /// <summary>
-    /// Returns all pickups (admin only). Supports optional filtering by status and date range.
-    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpGet]
     public ActionResult<List<PickupDocumentDto>> GetAll(
@@ -80,10 +77,6 @@ public class PickupsController(
         return Ok(pickups.Select(p => ToDto(p)).ToList());
     }
 
-    /// <summary>
-    /// Returns pickups for a driver.
-    /// Use ?activeOnly=true to get only in-progress tasks.
-    /// </summary>
     [Authorize(Roles = "Driver,Administrator")]
     [HttpGet("driver/{driverId:int}")]
     public async Task<ActionResult<List<PickupDocumentDto>>> GetForDriver(
@@ -253,9 +246,6 @@ public class PickupsController(
             return BadRequest(new { message = "Pickup document already exists for this accepted match." });
         }
 
-        // Fix 11: use Guid for the suffix to avoid the 100 000-value collision window that
-        // Ticks % 100000 gives. The DB unique index catches any residual duplicates with a
-        // 409 rather than a 500.
         var docSuffix = Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
         var document = new PickupDocument
         {
@@ -567,8 +557,7 @@ public class PickupsController(
             return NotFound();
         }
 
-        // Fix 14: verify the driver belongs to the organization that owns this pickup,
-        // preventing a driver from updating location on pickups they are not part of.
+        // Fix 14: verify the driver belongs to the organization that owns this pickup.
         if (!User.IsAdministrator() && pickup.Driver.CharityOrganizationId != pickup.CharityOrganizationId)
         {
             return Forbid();
@@ -590,7 +579,6 @@ public class PickupsController(
             updatedAtUtc = pickup.Driver.LocationUpdatedAtUtc
         };
 
-        // Fix 14: only broadcast to the parties directly involved in this pickup.
         await hubContext.Clients.Group($"{ActorType.CharityOrganization}:{pickup.CharityOrganizationId}")
             .SendAsync("driver-location", payload, cancellationToken);
         await hubContext.Clients.Group($"{ActorType.Driver}:{pickup.DriverId.Value}")
@@ -632,6 +620,7 @@ public class PickupsController(
 
         if (request.IssueType == PickupIssueType.FoodUnavailable)
         {
+            // Partner's fault — penalise partner, compensate organisation.
             var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
             if (partner is not null)
             {
@@ -661,6 +650,7 @@ public class PickupsController(
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
             if (organization is not null)
             {
+                // Compensate the organisation — they wasted a trip through no fault of their own.
                 organization.LastReceivedAtUtc = null;
                 organization.MatchCompensationBonus = Math.Max(organization.MatchCompensationBonus, 3m);
                 organization.MatchCompensationExpiresAtUtc = DateTime.UtcNow.AddDays(3);
@@ -674,14 +664,16 @@ public class PickupsController(
         }
         else if (request.IssueType is PickupIssueType.DriverUnavailable or PickupIssueType.LateArrival)
         {
+            // Organisation's fault — penalise organisation, no compensation bonus.
+            // Fix: previously this branch incorrectly granted a MatchCompensationBonus to the
+            // organisation even though it was their own driver/timing failure. The bonus exists
+            // solely to compensate victims of partner-side failures.
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
             if (organization is not null)
             {
                 var previousCancellationCount = organization.CancellationCount;
                 organization.CancellationCount++;
                 organization.ReputationScore = Math.Max(1, Math.Round(organization.ReputationScore - 0.2, 2));
-                organization.MatchCompensationBonus = Math.Max(organization.MatchCompensationBonus, 3m);
-                organization.MatchCompensationExpiresAtUtc = DateTime.UtcNow.AddDays(3);
 
                 if (previousCancellationCount < 3 && organization.CancellationCount >= 3)
                 {
@@ -724,11 +716,7 @@ public class PickupsController(
         }
         else if (request.IssueType == PickupIssueType.QuantityMismatch)
         {
-            // Fix 5: QuantityMismatch — the partner declared fewer kilograms than agreed in the
-            // offer. Penalise the partner lightly (no cancellation count, just a small reputation
-            // hit) and notify the admin so they can investigate. The pickup stays in
-            // ProblemReported; the organization must resolve it via PUT /{id}/resolve-issue
-            // (continue with whatever quantity is available, or cancel).
+            // Fix 5: light partner penalty; no org cancellation count.
             var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
             if (partner is not null)
             {
@@ -750,11 +738,9 @@ public class PickupsController(
                 cancellationToken,
                 NotificationType.AdminMessage);
         }
-        // Fix 5: PickupIssueType.Other — no automatic penalties. The pickup is placed in
-        // ProblemReported and the admin is notified so a human can assess the situation.
-        // The organization resolves it via PUT /{id}/resolve-issue.
         else if (request.IssueType == PickupIssueType.Other)
         {
+            // Fix 5: no automatic penalties; admin investigates.
             await notificationPublisher.NotifyAsync(
                 ActorType.Administrator,
                 0,
@@ -770,9 +756,6 @@ public class PickupsController(
         return Ok(issue);
     }
 
-    /// <summary>
-    /// Resolves a previously reported issue on a pickup, returning it to an actionable status.
-    /// </summary>
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPut("{id}/resolve-issue")]
     public async Task<IActionResult> ResolveIssue(int id, ResolvePickupIssueRequest request, CancellationToken cancellationToken)
@@ -892,8 +875,12 @@ public class PickupsController(
             var previousCancellationCount = organization.CancellationCount;
             organization.CancellationCount++;
             organization.ReputationScore = Math.Max(1, Math.Round(organization.ReputationScore - 0.2, 2));
-            organization.MatchCompensationBonus = Math.Max(organization.MatchCompensationBonus, 3m);
-            organization.MatchCompensationExpiresAtUtc = DateTime.UtcNow.AddDays(3);
+
+            // Fix: org-initiated cancellation — do NOT grant MatchCompensationBonus.
+            // The spec reserves the bonus for compensating organisations that are victims of
+            // partner failures. Granting it here would reward the cancelling party and
+            // undermine the deterrent effect of the reputation penalty.
+
             await unitOfWork.ReputationSnapshots.AddAsync(new ReputationSnapshot
             {
                 ActorType = ActorType.CharityOrganization,

@@ -212,8 +212,12 @@ public class MatchesController(IUnitOfWork unitOfWork, INotificationPublisher no
             organization.ReputationScore = Math.Max(
                 1,
                 Math.Round(organization.ReputationScore - 0.2, 2));
-            organization.MatchCompensationBonus = Math.Max(organization.MatchCompensationBonus, 3m);
-            organization.MatchCompensationExpiresAtUtc = DateTime.UtcNow.AddDays(3);
+
+            // Fix: cancelling an accepted match is the organization's fault — do NOT grant a
+            // MatchCompensationBonus here. The spec states the bonus is compensation for
+            // organizations that are victims of partner-side failures (food unavailable, etc.).
+            // Granting a bonus to the cancelling org was a copy-paste error that effectively
+            // rewarded bad behaviour with higher matching priority.
 
             await unitOfWork.ReputationSnapshots.AddAsync(
                 new ReputationSnapshot

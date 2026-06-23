@@ -95,6 +95,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
     [HttpPost("badges/refresh")]
     public async Task<IActionResult> RefreshBadges(CancellationToken cancellationToken)
     {
+        // Hospitality partners
         var partners = unitOfWork.HospitalityPartners.Query().ToList();
         foreach (var partner in partners.Where(p => p.SuccessfulDonations >= 50))
         {
@@ -124,6 +125,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             }, cancellationToken);
         }
 
+        // Charity organizations
         var organizations = unitOfWork.CharityOrganizations.Query().ToList();
         foreach (var organization in organizations.Where(o => o.AcceptedMatchCount >= 50))
         {
@@ -150,6 +152,39 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
                 ActorId = organization.Id,
                 Level = level,
                 Name = $"{level} recipient"
+            }, cancellationToken);
+        }
+
+        // Fix: Drivers also earn badges based on completed pickups and reputation score.
+        // Bronze at 50 completed pickups, Silver at 200, Gold at 500 with reputation >= 4.5.
+        // Previously RefreshBadges never processed drivers, so driver badges were only
+        // assignable manually via POST /reputation/badges — inconsistent with partner/org behaviour.
+        var drivers = unitOfWork.Drivers.Query().ToList();
+        foreach (var driver in drivers.Where(d => d.CompletedPickups >= 50))
+        {
+            var level = driver.CompletedPickups >= 500 && driver.ReputationScore >= 4.5
+                ? BadgeLevel.Gold
+                : driver.CompletedPickups >= 200
+                    ? BadgeLevel.Silver
+                    : BadgeLevel.Bronze;
+
+            var alreadyAssigned = unitOfWork.BadgeAssignments.Query().Any(b =>
+                b.ActorType == ActorType.Driver &&
+                b.ActorId == driver.Id &&
+                b.Level == level &&
+                !b.AssignedByAdmin);
+
+            if (alreadyAssigned)
+            {
+                continue;
+            }
+
+            await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
+            {
+                ActorType = ActorType.Driver,
+                ActorId = driver.Id,
+                Level = level,
+                Name = $"{level} driver"
             }, cancellationToken);
         }
 
