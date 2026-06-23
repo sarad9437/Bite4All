@@ -49,6 +49,38 @@ public class PickupsController(
     }
 
     /// <summary>
+    /// Returns all pickups (admin only). Supports optional filtering by status and date range.
+    /// </summary>
+    [Authorize(Roles = "Administrator")]
+    [HttpGet]
+    public ActionResult<List<PickupDocumentDto>> GetAll(
+        [FromQuery] PickupStatus? status = null,
+        [FromQuery] DateTime? fromUtc = null,
+        [FromQuery] DateTime? toUtc = null,
+        CancellationToken cancellationToken = default)
+    {
+        var query = unitOfWork.PickupDocuments.Query().AsQueryable();
+
+        if (status.HasValue)
+        {
+            query = query.Where(p => p.Status == status.Value);
+        }
+
+        if (fromUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc >= fromUtc.Value);
+        }
+
+        if (toUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc <= toUtc.Value);
+        }
+
+        var pickups = query.OrderByDescending(p => p.CreatedAtUtc).ToList();
+        return Ok(pickups.Select(p => ToDto(p)).ToList());
+    }
+
+    /// <summary>
     /// Returns pickups for a driver.
     /// Use ?activeOnly=true to get only in-progress tasks (Created, Assigned, DriverConfirmed, PickedUp, ProblemReported).
     /// </summary>
@@ -57,6 +89,9 @@ public class PickupsController(
     public async Task<ActionResult<List<PickupDocumentDto>>> GetForDriver(
         int driverId,
         [FromQuery] bool activeOnly = false,
+        [FromQuery] PickupStatus? status = null,
+        [FromQuery] DateTime? fromUtc = null,
+        [FromQuery] DateTime? toUtc = null,
         CancellationToken cancellationToken = default)
     {
         if (!User.IsAdministrator() && User.DriverId() != driverId)
@@ -70,6 +105,21 @@ public class PickupsController(
         if (activeOnly)
         {
             query = query.Where(p => ActiveStatuses.Contains(p.Status));
+        }
+
+        if (status.HasValue)
+        {
+            query = query.Where(p => p.Status == status.Value);
+        }
+
+        if (fromUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc >= fromUtc.Value);
+        }
+
+        if (toUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc <= toUtc.Value);
         }
 
         var pickups = query
@@ -86,15 +136,37 @@ public class PickupsController(
 
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpGet("organization/{organizationId:int}")]
-    public async Task<ActionResult<List<PickupDocumentDto>>> GetForOrganization(int organizationId, CancellationToken cancellationToken)
+    public async Task<ActionResult<List<PickupDocumentDto>>> GetForOrganization(
+        int organizationId,
+        [FromQuery] PickupStatus? status = null,
+        [FromQuery] DateTime? fromUtc = null,
+        [FromQuery] DateTime? toUtc = null,
+        CancellationToken cancellationToken = default)
     {
         if (!User.IsAdministrator() && User.CharityOrganizationId() != organizationId)
         {
             return Forbid();
         }
 
-        var pickups = unitOfWork.PickupDocuments.Query()
-            .Where(p => p.CharityOrganizationId == organizationId)
+        var query = unitOfWork.PickupDocuments.Query()
+            .Where(p => p.CharityOrganizationId == organizationId);
+
+        if (status.HasValue)
+        {
+            query = query.Where(p => p.Status == status.Value);
+        }
+
+        if (fromUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc >= fromUtc.Value);
+        }
+
+        if (toUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc <= toUtc.Value);
+        }
+
+        var pickups = query
             .OrderByDescending(p => p.CreatedAtUtc)
             .ToList();
 
@@ -108,15 +180,37 @@ public class PickupsController(
 
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpGet("partner/{hospitalityPartnerId:int}")]
-    public async Task<ActionResult<List<PickupDocumentDto>>> GetForPartner(int hospitalityPartnerId, CancellationToken cancellationToken)
+    public async Task<ActionResult<List<PickupDocumentDto>>> GetForPartner(
+        int hospitalityPartnerId,
+        [FromQuery] PickupStatus? status = null,
+        [FromQuery] DateTime? fromUtc = null,
+        [FromQuery] DateTime? toUtc = null,
+        CancellationToken cancellationToken = default)
     {
         if (!User.IsAdministrator() && User.HospitalityPartnerId() != hospitalityPartnerId)
         {
             return Forbid();
         }
 
-        var pickups = unitOfWork.PickupDocuments.Query()
-            .Where(p => p.HospitalityPartnerId == hospitalityPartnerId)
+        var query = unitOfWork.PickupDocuments.Query()
+            .Where(p => p.HospitalityPartnerId == hospitalityPartnerId);
+
+        if (status.HasValue)
+        {
+            query = query.Where(p => p.Status == status.Value);
+        }
+
+        if (fromUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc >= fromUtc.Value);
+        }
+
+        if (toUtc.HasValue)
+        {
+            query = query.Where(p => p.CreatedAtUtc <= toUtc.Value);
+        }
+
+        var pickups = query
             .OrderByDescending(p => p.CreatedAtUtc)
             .ToList();
 
@@ -171,6 +265,18 @@ public class PickupsController(
 
         await unitOfWork.PickupDocuments.AddAsync(document, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // Fix 1: notify the hospitality partner that a pickup document has been created
+        // and a driver will be assigned soon, so they can prepare the food.
+        await notificationPublisher.NotifyAsync(
+            ActorType.HospitalityPartner,
+            match.FoodOffer.HospitalityPartnerId,
+            "Pickup document created",
+            $"Organization \"{match.CharityOrganization.Name}\" created pickup {document.DocumentNumber}. A driver will be assigned shortly.",
+            cancellationToken,
+            NotificationType.PickupStatusChanged,
+            ActorType.CharityOrganization,
+            match.CharityOrganizationId);
 
         document.FoodOffer = match.FoodOffer;
         document.HospitalityPartner = match.FoodOffer.HospitalityPartner;
@@ -710,6 +816,16 @@ public class PickupsController(
         return NoContent();
     }
 
+    /// <summary>
+    /// Cancels a pickup on behalf of the charity organization.
+    ///
+    /// Fix 7: ProblemReported is excluded from the allowed statuses. Pickups in
+    /// ProblemReported must go through PUT /{id}/resolve-issue which has explicit
+    /// cancel/resume logic and does NOT charge a reputation penalty (the issue was
+    /// caused by the partner or driver, not the organisation). Using cancel-by-organization
+    /// from ProblemReported would incorrectly penalise the organisation's reputation and
+    /// bypass the structured issue-resolution path.
+    /// </summary>
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPut("{id}/cancel-by-organization")]
     public async Task<IActionResult> CancelByOrganization(int id, CancelPickupRequest request, CancellationToken cancellationToken)
@@ -725,9 +841,18 @@ public class PickupsController(
             return Forbid();
         }
 
-        if (pickup.Status is PickupStatus.PickedUp or PickupStatus.DeliveredToOrganization or PickupStatus.Cancelled)
+        // Fix 7: ProblemReported is now explicitly blocked here — use PUT /{id}/resolve-issue instead.
+        if (pickup.Status is PickupStatus.PickedUp
+                          or PickupStatus.DeliveredToOrganization
+                          or PickupStatus.Cancelled
+                          or PickupStatus.ProblemReported)
         {
-            return BadRequest(new { message = "This pickup cannot be cancelled by the organization anymore." });
+            return BadRequest(new
+            {
+                message = pickup.Status == PickupStatus.ProblemReported
+                    ? "Pickups with a reported problem must be resolved via PUT /pickups/{id}/resolve-issue."
+                    : "This pickup cannot be cancelled by the organization anymore."
+            });
         }
 
         var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
