@@ -281,9 +281,22 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
 
     private static double CalculateReputationScore(double averageRating, int confirmations, int cancellations)
     {
-        var confirmationRate = confirmations / (double)Math.Max(1, confirmations + 5);
-        var cancellationRate = cancellations / (double)Math.Max(1, cancellations + 5);
-        var score = averageRating * 0.4 + confirmationRate * 5 * 0.3 + (1 - cancellationRate) * 5 * 0.3;
+        // Spec: 40% average rating, 30% confirmation rate, 30% cancellation rate (negative impact)
+        // All components normalized to 1-5 scale
+        var totalOpportunities = Math.Max(1, confirmations + cancellations);
+        var confirmationRate = confirmations / (double)totalOpportunities;
+        var cancellationRate = cancellations / (double)totalOpportunities;
+        
+        // Rating component: 40% of final score (averageRating is already 1-5)
+        var ratingComponent = averageRating * 0.4;
+        
+        // Confirmation component: 30% of final score (rate 0-1 scaled to 0-5)
+        var confirmationComponent = confirmationRate * 5 * 0.3;
+        
+        // Cancellation component: 30% of final score (inverted rate 0-1 scaled to 0-5)
+        var cancellationComponent = (1 - cancellationRate) * 5 * 0.3;
+        
+        var score = ratingComponent + confirmationComponent + cancellationComponent;
         return Math.Round(Math.Clamp(score, 1, 5), 2);
     }
 

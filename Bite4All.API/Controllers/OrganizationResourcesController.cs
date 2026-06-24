@@ -2,6 +2,7 @@ using Bite4All.API.Authorization;
 using Bite4All.Application.Commands.Drivers;
 using Bite4All.Application.Commands.Recipients;
 using Bite4All.Application.Commands.Vehicles;
+using Bite4All.Application.DTOs.Common;
 using Bite4All.Application.DTOs.Onboarding;
 using Bite4All.Application.DTOs.Organizations;
 using Bite4All.Application.Queries.Organizations;
@@ -156,6 +157,8 @@ public class OrganizationResourcesController(
     /// <summary>
     /// Suspends a driver account. The driver cannot log in or be assigned to pickups
     /// while suspended. Only the owning organization or an admin can do this.
+    /// Fix 5: SuspendDriverCommand now returns (bool Success, string? Error) so the
+    /// controller can surface the error message (e.g. driver has active pickup) as 400.
     /// </summary>
     [HttpPut("drivers/{driverId}/suspend")]
     public async Task<IActionResult> SuspendDriver(int driverId, SuspendRequest request, CancellationToken cancellationToken)
@@ -171,19 +174,13 @@ public class OrganizationResourcesController(
             return Forbid();
         }
 
-        if (!driver.IsActive)
-        {
-            return BadRequest(new { message = "Driver is already suspended." });
-        }
-
-        return await sender.Send(new SuspendDriverCommand(driverId, request.Reason), cancellationToken)
-            ? NoContent()
-            : NotFound();
+        // Fix 5: use tuple result — handler now also blocks suspension when driver has an active pickup.
+        var (success, error) = await sender.Send(new SuspendDriverCommand(driverId, request.Reason), cancellationToken);
+        return success ? NoContent() : BadRequest(new { message = error });
     }
 
     /// <summary>
-    /// Reinstates a suspended driver. The driver can log in and be assigned to
-    /// pickups again.
+    /// Reinstates a suspended driver.
     /// </summary>
     [HttpPut("drivers/{driverId}/unsuspend")]
     public async Task<IActionResult> UnsuspendDriver(int driverId, CancellationToken cancellationToken)
@@ -340,8 +337,7 @@ public class OrganizationResourcesController(
     }
 
     /// <summary>
-    /// Permanently deactivates a vehicle. Cannot be undone. Vehicle must not be
-    /// assigned to any active pickup.
+    /// Permanently deactivates a vehicle. Cannot be undone.
     /// </summary>
     [HttpDelete("vehicles/{vehicleId}")]
     public async Task<IActionResult> DeactivateVehicle(int vehicleId, CancellationToken cancellationToken)
@@ -405,15 +401,17 @@ public class OrganizationResourcesController(
     }
 
     /// <summary>
-    /// Returns full list of recipients for the organization — including their
-    /// internal codes and dietary restrictions — for internal management.
-    /// Only the owning organization and admins can access this.
+    /// Returns a paginated list of recipients for the organization.
+    /// Fix 7: added pagination (PagedResult) — without it, organizations with hundreds
+    /// of recipients would return unbounded lists causing performance and memory issues.
     /// By default returns only active recipients. Pass includeInactive=true to see deactivated ones too.
     /// </summary>
     [HttpGet("{organizationId}/recipients/list")]
-    public async Task<ActionResult<List<Recipient>>> GetRecipientsList(
+    public async Task<ActionResult<PagedResult<Recipient>>> GetRecipientsList(
         int organizationId,
         [FromQuery] bool includeInactive = false,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
         CancellationToken cancellationToken = default)
     {
         var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(organizationId, cancellationToken);
@@ -432,9 +430,9 @@ public class OrganizationResourcesController(
             return Forbid();
         }
 
-        // Fix: by default only active recipients are returned.
-        // Deactivated recipients are excluded from live operations (matching, distributions)
-        // but admins and the organization itself can request the full list via includeInactive=true.
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
         var query = unitOfWork.Recipients.Query()
             .Where(r => r.CharityOrganizationId == organizationId);
 
@@ -443,7 +441,20 @@ public class OrganizationResourcesController(
             query = query.Where(r => r.IsActive);
         }
 
-        return Ok(query.OrderBy(r => r.InternalCode).ToList());
+        var totalCount = query.Count();
+        var items = query
+            .OrderBy(r => r.InternalCode)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<Recipient>
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     [HttpPut("{organizationId}/temporary-capacity")]
@@ -524,9 +535,6 @@ public class OrganizationResourcesController(
         return summary is null ? NotFound() : Ok(summary);
     }
 
-    /// <summary>
-    /// Updates the dietary restrictions of a recipient.
-    /// </summary>
     [HttpPut("recipients/{recipientId}")]
     public async Task<IActionResult> UpdateRecipient(int recipientId, UpdateRecipientRequest request, CancellationToken cancellationToken)
     {
@@ -536,7 +544,6 @@ public class OrganizationResourcesController(
             return NotFound();
         }
 
-        // Fix: deactivated recipients cannot be updated — they are soft-deleted.
         if (!recipient.IsActive)
         {
             return BadRequest(new { message = "Deactivated recipients cannot be updated." });
@@ -561,10 +568,6 @@ public class OrganizationResourcesController(
             : NotFound();
     }
 
-    /// <summary>
-    /// Soft-deletes a recipient. Historical distribution records are preserved.
-    /// Deactivated recipients are excluded from new distributions and dietary matching.
-    /// </summary>
     [HttpDelete("recipients/{recipientId}")]
     public async Task<IActionResult> DeactivateRecipient(int recipientId, CancellationToken cancellationToken)
     {

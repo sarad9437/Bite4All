@@ -14,12 +14,17 @@ namespace Bite4All.API.Controllers;
 [Route("matches")]
 public class MatchesController(IUnitOfWork unitOfWork, INotificationPublisher notificationPublisher) : ControllerBase
 {
+    private static readonly MatchDecision[] SkippedDecisions =
+    [
+        MatchDecision.SkippedByBlock,
+        MatchDecision.SkippedByCapacity,
+        MatchDecision.SkippedByDiet
+    ];
+
     /// <summary>
-    /// Fix 3: returns a paginated list of offer matches for the currently authenticated
+    /// Returns a paginated list of offer matches for the currently authenticated
     /// charity organization (or any organization when called by an admin).
-    /// Supports optional filtering by decision and date range.
-    /// Skipped matches (SkippedByBlock, SkippedByCapacity, SkippedByDiet) are excluded
-    /// by default unless the caller explicitly asks for them via includeSkipped=true.
+    /// Skipped matches are excluded by default unless includeSkipped=true is passed.
     /// </summary>
     [HttpGet("my")]
     public ActionResult<PagedResult<OfferMatch>> GetMine(
@@ -55,19 +60,12 @@ public class MatchesController(IUnitOfWork unitOfWork, INotificationPublisher no
         page = Math.Max(page, 1);
         pageSize = Math.Clamp(pageSize, 1, 100);
 
-        var skippedDecisions = new[]
-        {
-            MatchDecision.SkippedByBlock,
-            MatchDecision.SkippedByCapacity,
-            MatchDecision.SkippedByDiet
-        };
-
         var query = unitOfWork.OfferMatches.Query()
             .Where(m => m.CharityOrganizationId == resolvedOrgId);
 
         if (!includeSkipped)
         {
-            query = query.Where(m => !skippedDecisions.Contains(m.Decision));
+            query = query.Where(m => !SkippedDecisions.Contains(m.Decision));
         }
 
         if (decision.HasValue)
@@ -137,6 +135,19 @@ public class MatchesController(IUnitOfWork unitOfWork, INotificationPublisher no
         if (match.FoodOffer.Status is FoodOfferStatus.Reserved or FoodOfferStatus.Completed or FoodOfferStatus.Cancelled or FoodOfferStatus.Expired)
         {
             return BadRequest(new { message = "Offer is no longer available for acceptance." });
+        }
+
+        // Fix 3: respect block relations — a blocked organisation cannot accept even a pending match.
+        // This guards against race conditions where a block is added after matching runs.
+        var isBlocked = unitOfWork.BlockRelations.Query().Any(b =>
+            b.IsActive &&
+            b.HospitalityPartnerId == match.FoodOffer.HospitalityPartnerId &&
+            b.CharityOrganizationId == match.CharityOrganizationId &&
+            (b.BlockedByHospitalityPartner || b.BlockedByOrganization));
+
+        if (isBlocked)
+        {
+            return BadRequest(new { message = "Your organisation is blocked by this hospitality partner and cannot accept their offers." });
         }
 
         match.Decision = MatchDecision.Accepted;
@@ -212,12 +223,6 @@ public class MatchesController(IUnitOfWork unitOfWork, INotificationPublisher no
             organization.ReputationScore = Math.Max(
                 1,
                 Math.Round(organization.ReputationScore - 0.2, 2));
-
-            // Fix: cancelling an accepted match is the organization's fault — do NOT grant a
-            // MatchCompensationBonus here. The spec states the bonus is compensation for
-            // organizations that are victims of partner-side failures (food unavailable, etc.).
-            // Granting a bonus to the cancelling org was a copy-paste error that effectively
-            // rewarded bad behaviour with higher matching priority.
 
             await unitOfWork.ReputationSnapshots.AddAsync(
                 new ReputationSnapshot

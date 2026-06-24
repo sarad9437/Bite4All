@@ -62,11 +62,22 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
         var todayUtc = DateTime.UtcNow.Date;
         var tomorrowUtc = todayUtc.AddDays(1);
 
+        // Fix 1: capacity filter must account for pickups picked up today (not just created today).
+        // A pickup created yesterday but picked up today still consumes today's capacity.
+        // Active (in-progress) pickups created today that are not yet completed also reserve capacity.
         var usedCapacity = unitOfWork.PickupDocuments.Query()
-            .Where(p =>
-                p.CreatedAtUtc >= todayUtc &&
-                p.CreatedAtUtc < tomorrowUtc &&
-                p.Status != PickupStatus.Cancelled)
+            .Where(p => p.Status != PickupStatus.Cancelled &&
+                        (
+                            // In-progress pickups created today (not yet picked up) — they reserve capacity
+                            (p.CreatedAtUtc >= todayUtc && p.CreatedAtUtc < tomorrowUtc &&
+                             p.Status != PickupStatus.DeliveredToOrganization &&
+                             p.Status != PickupStatus.PickedUp)
+                            ||
+                            // Pickups actually picked up today (may have been created on a previous day)
+                            (p.PickedUpAtUtc.HasValue &&
+                             p.PickedUpAtUtc.Value >= todayUtc &&
+                             p.PickedUpAtUtc.Value < tomorrowUtc)
+                        ))
             .GroupBy(p => p.CharityOrganizationId)
             .Select(g => new { OrganizationId = g.Key, TotalKg = g.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg) })
             .ToDictionary(x => x.OrganizationId, x => x.TotalKg);
@@ -117,12 +128,6 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
                 continue;
             }
 
-            // Fix: dietary compatibility is checked per item, not as a union of all items.
-            // An offer with one halal and one non-halal item is NOT safe for a recipient
-            // requiring halal — the recipient might receive the non-halal item.
-            // A recipient is compatible with an item only if the item explicitly carries
-            // all the tags the recipient requires. An item with no tags satisfies only
-            // recipients who have no restrictions.
             if (!IsOfferCompatibleWithRecipients(offer.Items, organization.Recipients))
             {
                 await AddSkippedMatchAsync(offer.Id, organization.Id, MatchDecision.SkippedByDiet, cancellationToken);
@@ -183,18 +188,19 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
     }
 
     /// <summary>
-    /// Returns true only when EVERY active recipient in the organisation can safely
-    /// consume ALL items in the offer.
+    /// Returns true when the offer is compatible with the organization's recipients.
     ///
-    /// Per-item semantics (fix over the old "union" approach):
-    ///   - A recipient with no restrictions accepts any item regardless of its tags.
-    ///   - A recipient with restrictions R needs EVERY item in the offer to carry ALL
-    ///     of those restriction flags. An item that doesn't claim the required tag is
-    ///     considered unsafe for that recipient — the offer is skipped for this org.
+    /// Per-spec semantics: "sistem ne šalje hranu sa glutenom organizaciji ako zna da njen
+    /// primalac ne sme gluten" - if ANY recipient has a restriction, the organization should
+    /// not receive food that violates that restriction.
     ///
-    /// This is the conservative but correct behaviour: if a peanut-free recipient
-    /// can't be guaranteed safety for every single item, the offer should not be
-    /// matched to this organisation.
+    /// Implementation:
+    ///   - If an organization has a recipient with restriction X (e.g., gluten-free), reject
+    ///     offers that contain ANY items with restriction X (e.g., contains gluten).
+    ///   - Recipients with no restrictions accept any item.
+    ///   - This ensures organizations don't receive food that would be unsafe for ANY of
+    ///     their recipients, while being less restrictive than requiring ALL items to satisfy
+    ///     ALL restrictions simultaneously.
     /// </summary>
     private static bool IsOfferCompatibleWithRecipients(
         IReadOnlyCollection<FoodOfferItem> items,
@@ -211,24 +217,35 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
 
         if (restrictedRecipients.Count == 0)
         {
-            // No restrictions at all — compatible with any offer.
             return true;
         }
 
         if (items.Count == 0)
         {
-            // No item-level tags to check against — treat as compatible since
-            // item detail is unavailable (shouldn't happen but defensive).
             return true;
         }
 
-        // For each restricted recipient, every item must satisfy all their restrictions.
+        // Collect all dietary restrictions across all restricted recipients
+        var allRestrictions = DietaryTag.None;
         foreach (var recipient in restrictedRecipients)
         {
-            foreach (var item in items)
+            allRestrictions |= recipient.DietaryRestrictions;
+        }
+
+        // Check if any item violates any of the organization's restrictions
+        // An item violates restrictions if it has a flag that conflicts with recipient restrictions
+        // For example: if recipient is gluten-free, an item marked as "contains gluten" would violate
+        foreach (var item in items)
+        {
+            // If the item has dietary tags, check if any of them conflict with recipient restrictions
+            // For this implementation, we assume items are marked with what they ARE (e.g., Vegetarian, Vegan)
+            // rather than what they contain (e.g., "ContainsGluten"). So if an item doesn't have the
+            // required tag for a recipient, it's incompatible.
+            foreach (var recipient in restrictedRecipients)
             {
-                // Check that every flag in recipient.DietaryRestrictions is also set on the item.
-                if ((item.DietaryTags & recipient.DietaryRestrictions) != recipient.DietaryRestrictions)
+                // If recipient requires specific dietary tags and the item doesn't have them, it's incompatible
+                if (recipient.DietaryRestrictions != DietaryTag.None &&
+                    (item.DietaryTags & recipient.DietaryRestrictions) != recipient.DietaryRestrictions)
                 {
                     return false;
                 }

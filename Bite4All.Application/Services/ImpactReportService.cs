@@ -50,13 +50,15 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
         {
             distributionsQuery = distributionsQuery.Where(d => d.DistributedAtUtc <= toUtc.Value);
         }
-        var uniqueRecipientsHelped = distributionsQuery.Select(d => d.RecipientId).Distinct().Count();
+        var distributions = distributionsQuery.ToList();
+        var uniqueRecipientsHelped = distributions.Select(d => d.RecipientId).Distinct().Count();
+        var recordedMeals = distributions.Sum(d => d.MealsCount);
 
         return new AdminImpactReportDto
         {
             TotalRescuedKg = totalKg,
             EstimatedCo2SavedKg = totalKg * 2.5m,
-            MealsProvided = (int)Math.Floor(totalKg * 2),
+            MealsProvided = recordedMeals > 0 ? recordedMeals : (int)Math.Floor(totalKg * 2),
             UnusedOffersCount = unusedOfferList.Count,
             UnusedOffersKg = unusedOfferList.Sum(o => o.TotalQuantityKg),
             UniqueRecipientsHelped = uniqueRecipientsHelped,
@@ -128,6 +130,12 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
             .Where(o => o.HospitalityPartnerId == hospitalityPartnerId)
             .ToList();
 
+        // Calculate meals based on recorded distributions for this partner's pickups
+        var partnerPickupIds = pickups.Select(p => p.Id).ToList();
+        var partnerDistributionsQuery = unitOfWork.RecipientMealDistributions.Query()
+            .Where(d => partnerPickupIds.Contains(d.PickupDocumentId));
+        var recordedMeals = partnerDistributionsQuery.Sum(d => d.MealsCount);
+
         return new PartnerImpactReportDto
         {
             HospitalityPartnerId = hospitalityPartnerId,
@@ -137,7 +145,7 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
             UnusedOffersKg = unusedOffers.Sum(o => o.TotalQuantityKg),
             ReputationScore = partner.ReputationScore,
             EstimatedCo2SavedKg = totalKg * 2.5m,
-            MealsProvided = (int)Math.Floor(totalKg * 2),
+            MealsProvided = recordedMeals > 0 ? recordedMeals : (int)Math.Floor(totalKg * 2),
             NextBadgeHint = GetNextBadgeHint(partner.SuccessfulDonations, partner.TotalDonatedKg, partner.ReputationScore)
         };
     }
