@@ -408,9 +408,13 @@ public class OrganizationResourcesController(
     /// Returns full list of recipients for the organization — including their
     /// internal codes and dietary restrictions — for internal management.
     /// Only the owning organization and admins can access this.
+    /// By default returns only active recipients. Pass includeInactive=true to see deactivated ones too.
     /// </summary>
     [HttpGet("{organizationId}/recipients/list")]
-    public async Task<ActionResult<List<Recipient>>> GetRecipientsList(int organizationId, CancellationToken cancellationToken)
+    public async Task<ActionResult<List<Recipient>>> GetRecipientsList(
+        int organizationId,
+        [FromQuery] bool includeInactive = false,
+        CancellationToken cancellationToken = default)
     {
         var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(organizationId, cancellationToken);
         if (organization is null)
@@ -428,10 +432,18 @@ public class OrganizationResourcesController(
             return Forbid();
         }
 
-        return Ok(unitOfWork.Recipients.Query()
-            .Where(r => r.CharityOrganizationId == organizationId)
-            .OrderBy(r => r.InternalCode)
-            .ToList());
+        // Fix: by default only active recipients are returned.
+        // Deactivated recipients are excluded from live operations (matching, distributions)
+        // but admins and the organization itself can request the full list via includeInactive=true.
+        var query = unitOfWork.Recipients.Query()
+            .Where(r => r.CharityOrganizationId == organizationId);
+
+        if (!includeInactive)
+        {
+            query = query.Where(r => r.IsActive);
+        }
+
+        return Ok(query.OrderBy(r => r.InternalCode).ToList());
     }
 
     [HttpPut("{organizationId}/temporary-capacity")]
@@ -522,6 +534,12 @@ public class OrganizationResourcesController(
         if (recipient is null)
         {
             return NotFound();
+        }
+
+        // Fix: deactivated recipients cannot be updated — they are soft-deleted.
+        if (!recipient.IsActive)
+        {
+            return BadRequest(new { message = "Deactivated recipients cannot be updated." });
         }
 
         if (!User.IsAdministrator() && User.CharityOrganizationId() != recipient.CharityOrganizationId)

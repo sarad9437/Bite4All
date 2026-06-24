@@ -31,6 +31,15 @@ public class PickupsController(
         PickupStatus.ProblemReported
     ];
 
+    // Statuses on which it makes no sense to report a new issue.
+    private static readonly PickupStatus[] NonReportableStatuses =
+    [
+        PickupStatus.PickedUp,
+        PickupStatus.DeliveredToOrganization,
+        PickupStatus.Cancelled,
+        PickupStatus.ProblemReported
+    ];
+
     [Authorize]
     [HttpGet("{id:int}")]
     public async Task<ActionResult<PickupDocumentDto>> GetById(int id, CancellationToken cancellationToken)
@@ -50,11 +59,6 @@ public class PickupsController(
         return Ok(ToDto(pickup));
     }
 
-    /// <summary>
-    /// Fix: this admin listing previously returned every pickup document in the system
-    /// in a single response with no paging, which does not scale as the table grows.
-    /// Now returns a PagedResult consistent with the other list endpoints in the API.
-    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpGet]
     public ActionResult<PagedResult<PickupDocumentDto>> GetAll(
@@ -264,6 +268,19 @@ public class PickupsController(
             return Forbid();
         }
 
+        // Fix: do not allow creating a pickup document if the hospitality partner
+        // has been suspended since the match was created. A suspended partner cannot
+        // fulfill the donation and the pickup would be unresolvable.
+        if (match.FoodOffer.HospitalityPartner.ApprovalStatus == ApprovalStatus.Suspended)
+        {
+            return BadRequest(new { message = "Cannot create a pickup document because the hospitality partner account is currently suspended." });
+        }
+
+        if (match.FoodOffer.HospitalityPartner.ApprovalStatus != ApprovalStatus.Approved)
+        {
+            return BadRequest(new { message = "Cannot create a pickup document because the hospitality partner account is not approved." });
+        }
+
         if (match.FoodOffer.Status is not (FoodOfferStatus.Reserved or FoodOfferStatus.Active or FoodOfferStatus.PublicFallback))
         {
             return BadRequest(new { message = "This offer is no longer available — it may have been cancelled, expired, or already completed." });
@@ -332,6 +349,17 @@ public class PickupsController(
         if (!User.IsAdministrator() && User.CharityOrganizationId() != pickup.CharityOrganizationId)
         {
             return Forbid();
+        }
+
+        // Fix: the organization must still be approved at the time of assignment.
+        // It could have been suspended after the match was accepted.
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
         }
 
         if (pickup.Status != PickupStatus.Created)
@@ -440,12 +468,6 @@ public class PickupsController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Fix: ActualQuantityKg was previously never validated at this entry point —
-    /// the CompletePickupRequestValidator existed but was not injected/invoked here,
-    /// so zero, negative, or absurdly large quantities could be persisted and would
-    /// silently corrupt impact/CO2 reports.
-    /// </summary>
     [Authorize(Roles = "Driver,Administrator")]
     [HttpPut("{id}/complete")]
     public async Task<IActionResult> Complete(int id, CompletePickupRequest request, CancellationToken cancellationToken)
@@ -645,7 +667,7 @@ public class PickupsController(
 
     [Authorize(Roles = "Driver,CharityOrganization,Administrator")]
     [HttpPost("{id}/issues")]
-    public async Task<ActionResult<PickupIssue>> ReportIssue(int id, Bite4All.Application.DTOs.Pickups.CreatePickupIssueRequest request, CancellationToken cancellationToken)
+    public async Task<ActionResult<PickupIssue>> ReportIssue(int id, CreatePickupIssueRequest request, CancellationToken cancellationToken)
     {
         var pickup = await unitOfWork.PickupDocuments.GetByIdAsync(id, cancellationToken);
         if (pickup is null)
@@ -663,6 +685,24 @@ public class PickupsController(
         if (string.IsNullOrWhiteSpace(request.Note))
         {
             return BadRequest(new { message = "Issue note is required." });
+        }
+
+        // Fix: issues can only be reported on pickups that are still in progress.
+        // Reporting on a completed, cancelled, or already-problematic pickup makes no
+        // operational sense and would create confusing data in the system.
+        if (NonReportableStatuses.Contains(pickup.Status))
+        {
+            return BadRequest(new
+            {
+                message = pickup.Status switch
+                {
+                    PickupStatus.PickedUp => "Cannot report an issue on a pickup that has already been completed (food picked up). Use the deliver endpoint or cancel if needed.",
+                    PickupStatus.DeliveredToOrganization => "Cannot report an issue on a pickup that has already been delivered.",
+                    PickupStatus.Cancelled => "Cannot report an issue on a cancelled pickup.",
+                    PickupStatus.ProblemReported => "This pickup already has a reported problem. Resolve the existing issue first via PUT /pickups/{id}/resolve-issue.",
+                    _ => "Cannot report an issue on this pickup in its current state."
+                }
+            });
         }
 
         var issue = new PickupIssue
@@ -984,10 +1024,6 @@ public class PickupsController(
             Body = $"Pickup was cancelled by organization. Reason: {request.Reason}"
         }, cancellationToken);
 
-        // Fix: previously the next-in-line organization was notified that the offer reopened,
-        // but nextPending.NotifiedAtUtc was never set — so the scheduler's match-timeout sweep
-        // (which only inspects matches where NotifiedAtUtc.HasValue) could never expire this
-        // organization's response window, leaving the offer stuck indefinitely if they ignored it.
         if (nextPending is not null)
         {
             nextPending.NotifiedAtUtc = DateTime.UtcNow;

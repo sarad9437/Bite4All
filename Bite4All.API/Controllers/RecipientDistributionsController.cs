@@ -28,6 +28,13 @@ public class RecipientDistributionsController(IUnitOfWork unitOfWork) : Controll
             return NotFound();
         }
 
+        // Fix: deactivated recipients cannot receive new meal distributions.
+        // Their historical records are preserved but they must not appear in new entries.
+        if (!recipient.IsActive)
+        {
+            return BadRequest(new { message = "Recipient is deactivated and cannot receive new meal distributions." });
+        }
+
         if (pickup.Status is not (PickupStatus.PickedUp or PickupStatus.DeliveredToOrganization))
         {
             return BadRequest(new { message = "Meals can be recorded only after food is picked up or delivered." });
@@ -49,9 +56,7 @@ public class RecipientDistributionsController(IUnitOfWork unitOfWork) : Controll
             return Forbid();
         }
 
-        // Fix: prevent duplicate distribution records for the same (pickup, recipient) pair.
-        // The same meal should not be recorded twice for the same person on the same pickup —
-        // this would inflate MealsReceivedCount and reporting figures.
+        // Prevent duplicate distribution records for the same (pickup, recipient) pair.
         var alreadyRecorded = unitOfWork.RecipientMealDistributions.Query().Any(d =>
             d.PickupDocumentId == request.PickupDocumentId &&
             d.RecipientId == request.RecipientId);

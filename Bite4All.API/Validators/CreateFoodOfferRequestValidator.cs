@@ -16,10 +16,16 @@ public class CreateFoodOfferRequestValidator : AbstractValidator<CreateFoodOffer
             .GreaterThan(0)
             .WithMessage("Total quantity must be greater than zero.");
 
-        // Fix 13: FoodCategory enum starts at 1 — reject default 0 value.
+        // FoodCategory enum starts at 1 — reject default 0 value.
         RuleFor(r => r.Category)
             .Must(c => Enum.IsDefined(typeof(FoodCategory), c) && c != 0)
             .WithMessage("A valid food category is required.");
+
+        // Fix: pickup window start must be in the future — no point accepting
+        // a past pickup window since no organization would be able to collect the food.
+        RuleFor(r => r.PickupWindowStartUtc)
+            .GreaterThan(_ => DateTime.UtcNow)
+            .WithMessage("Pickup window start must be in the future.");
 
         RuleFor(r => r.PickupWindowEndUtc)
             .GreaterThan(r => r.PickupWindowStartUtc)
@@ -29,8 +35,13 @@ public class CreateFoodOfferRequestValidator : AbstractValidator<CreateFoodOffer
             .GreaterThanOrEqualTo(_ => DateTime.UtcNow.AddHours(2))
             .WithMessage("Food must be valid for at least two hours from offer creation.");
 
-        // Fix: added upper bound — no more than 24 hours (1440 minutes) response window.
-        // Without this, a caller could set 999999 minutes and effectively freeze the cascade.
+        // Fix: food cannot expire before the pickup window closes — that would
+        // mean the food is already expired by the time the driver arrives.
+        RuleFor(r => r.ExpiresAtUtc)
+            .GreaterThanOrEqualTo(r => r.PickupWindowEndUtc)
+            .WithMessage("Food expiry must be at or after the end of the pickup window.");
+
+        // No more than 24 hours (1440 minutes) response window.
         RuleFor(r => r.MatchResponseWindowMinutes)
             .GreaterThan(0)
             .WithMessage("Match response window must be greater than zero.")

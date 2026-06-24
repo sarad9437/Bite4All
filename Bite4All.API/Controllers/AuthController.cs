@@ -32,8 +32,6 @@ public class AuthController(
                 return Unauthorized(new { message = "Your account is unavailable." });
             }
 
-            // Fix 6: distinguish Suspended from Rejected/Pending so the user gets a
-            // meaningful message instead of the generic "waiting for approval".
             if (partner.ApprovalStatus == ApprovalStatus.Suspended)
             {
                 return Unauthorized(new
@@ -57,7 +55,6 @@ public class AuthController(
                 return Unauthorized(new { message = "Your account is unavailable." });
             }
 
-            // Fix 6: distinguish Suspended from Rejected/Pending.
             if (organization.ApprovalStatus == ApprovalStatus.Suspended)
             {
                 return Unauthorized(new
@@ -81,13 +78,23 @@ public class AuthController(
                 return Unauthorized(new { message = "Your account is unavailable." });
             }
 
+            // Fix: suspended drivers cannot log in — check IsActive before anything else.
+            if (!driver.IsActive)
+            {
+                return Unauthorized(new
+                {
+                    message = string.IsNullOrWhiteSpace(driver.SuspensionReason)
+                        ? "Your driver account has been suspended. Please contact your organization administrator."
+                        : $"Your driver account has been suspended: {driver.SuspensionReason}"
+                });
+            }
+
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(driver.CharityOrganizationId);
             if (organization is null)
             {
                 return Unauthorized(new { message = "Your account is unavailable." });
             }
 
-            // Fix 6: a driver whose organization is suspended cannot log in either.
             if (organization.ApprovalStatus == ApprovalStatus.Suspended)
             {
                 return Unauthorized(new { message = "Your organization's account has been suspended. Please contact the platform administrator." });

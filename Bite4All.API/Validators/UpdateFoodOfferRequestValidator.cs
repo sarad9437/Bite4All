@@ -16,6 +16,12 @@ public class UpdateFoodOfferRequestValidator : AbstractValidator<UpdateFoodOffer
             .WithMessage("Total quantity must be greater than zero.")
             .When(r => r.TotalQuantityKg.HasValue);
 
+        // Fix: pickup window start must be in the future when provided.
+        RuleFor(r => r.PickupWindowStartUtc)
+            .GreaterThan(_ => DateTime.UtcNow)
+            .WithMessage("Pickup window start must be in the future.")
+            .When(r => r.PickupWindowStartUtc.HasValue);
+
         RuleFor(r => r.PickupWindowEndUtc)
             .GreaterThan(r => r.PickupWindowStartUtc!.Value)
             .WithMessage("Pickup window end must be after start.")
@@ -25,6 +31,12 @@ public class UpdateFoodOfferRequestValidator : AbstractValidator<UpdateFoodOffer
             .GreaterThanOrEqualTo(_ => DateTime.UtcNow.AddHours(2))
             .WithMessage("Food must be valid for at least two hours from now.")
             .When(r => r.ExpiresAtUtc.HasValue);
+
+        // Fix: expiry must not be before the pickup window closes.
+        RuleFor(r => r.ExpiresAtUtc)
+            .GreaterThanOrEqualTo(r => r.PickupWindowEndUtc!.Value)
+            .WithMessage("Food expiry must be at or after the end of the pickup window.")
+            .When(r => r.ExpiresAtUtc.HasValue && r.PickupWindowEndUtc.HasValue);
 
         RuleFor(r => r.MatchResponseWindowMinutes)
             .GreaterThan(0)

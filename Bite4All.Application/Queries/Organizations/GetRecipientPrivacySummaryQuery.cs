@@ -18,8 +18,11 @@ public class GetRecipientPrivacySummaryQueryHandler(IUnitOfWork unitOfWork)
             return null;
         }
 
+        // Fix: only active recipients are counted in the privacy summary.
+        // Deactivated recipients no longer represent current dietary constraints
+        // and should not appear in live capacity/diet calculations.
         var recipients = unitOfWork.Recipients.Query()
-            .Where(r => r.CharityOrganizationId == request.OrganizationId)
+            .Where(r => r.CharityOrganizationId == request.OrganizationId && r.IsActive)
             .ToList();
 
         var flags = new[]
