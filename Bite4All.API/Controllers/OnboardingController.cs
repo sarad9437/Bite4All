@@ -64,6 +64,15 @@ public class OnboardingController(
             return BadRequest(userResult.Errors.Select(e => e.Description));
         }
 
+        // Fix: notify the administrator that a new registration is awaiting review.
+        await notificationPublisher.NotifyAsync(
+            ActorType.Administrator,
+            0,
+            "New partner registration",
+            $"Hospitality partner \"{partner.Name}\" has registered and is awaiting approval.",
+            cancellationToken,
+            NotificationType.RegistrationDecision);
+
         return CreatedAtAction(nameof(GetPendingRegistrations), new { id = partner.Id }, partner);
     }
 
@@ -112,6 +121,15 @@ public class OnboardingController(
             await unitOfWork.SaveChangesAsync(cancellationToken);
             return BadRequest(userResult.Errors.Select(e => e.Description));
         }
+
+        // Fix: notify the administrator that a new organization is awaiting review.
+        await notificationPublisher.NotifyAsync(
+            ActorType.Administrator,
+            0,
+            "New organization registration",
+            $"Charity organization \"{organization.Name}\" has registered and is awaiting approval.",
+            cancellationToken,
+            NotificationType.RegistrationDecision);
 
         return CreatedAtAction(nameof(GetPendingRegistrations), new { id = organization.Id }, organization);
     }
@@ -176,11 +194,6 @@ public class OnboardingController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Fix 6: suspends an approved hospitality partner — blocks login and prevents
-    /// new offers while preserving all historical data. Admins should use this
-    /// for temporary bans rather than Rejected (which is permanent).
-    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpPut("hospitality-partners/{id}/suspend")]
     public async Task<IActionResult> SuspendPartner(int id, SuspendRequest request, CancellationToken cancellationToken)
@@ -209,10 +222,6 @@ public class OnboardingController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Fix 6: reinstates a suspended hospitality partner. The account is moved back to
-    /// Approved so the partner can log in and create offers again.
-    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpPut("hospitality-partners/{id}/unsuspend")]
     public async Task<IActionResult> UnsuspendPartner(int id, CancellationToken cancellationToken)
@@ -241,9 +250,6 @@ public class OnboardingController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Fix 6: suspends an approved charity organization.
-    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpPut("organizations/{id}/suspend")]
     public async Task<IActionResult> SuspendOrganization(int id, SuspendRequest request, CancellationToken cancellationToken)
@@ -272,9 +278,6 @@ public class OnboardingController(
         return NoContent();
     }
 
-    /// <summary>
-    /// Fix 6: reinstates a suspended charity organization.
-    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpPut("organizations/{id}/unsuspend")]
     public async Task<IActionResult> UnsuspendOrganization(int id, CancellationToken cancellationToken)

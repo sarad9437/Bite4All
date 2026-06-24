@@ -40,10 +40,6 @@ public class FoodOffersController(
         return Ok(await foodOfferService.SearchAsync(request, cancellationToken));
     }
 
-    /// <summary>
-    /// Returns all food offers for a specific hospitality partner — paginated.
-    /// The partner can only see their own offers. Admins see any partner's offers.
-    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpGet("partner/{hospitalityPartnerId:int}")]
     public async Task<ActionResult> GetByPartner(
@@ -219,6 +215,11 @@ public class FoodOffersController(
         }
     }
 
+    /// <summary>
+    /// Uploads a photo for a food offer. The uploaded file is saved to wwwroot/uploads/food-offers/
+    /// and the URL is stored on the offer. Only the owning partner or an admin can upload.
+    /// Note: the static files are served without authentication — store only non-sensitive imagery.
+    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPost("{id}/photo")]
     public async Task<IActionResult> UploadPhoto(int id, IFormFile file, CancellationToken cancellationToken)
@@ -259,7 +260,6 @@ public class FoodOffersController(
         var uploadDirectory = Path.Combine(root, "uploads", "food-offers");
         Directory.CreateDirectory(uploadDirectory);
 
-        // Delete old photo file if it exists
         if (!string.IsNullOrWhiteSpace(offer.PhotoUrl))
         {
             var oldPath = Path.Combine(root, offer.PhotoUrl.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
@@ -283,9 +283,6 @@ public class FoodOffersController(
         return Ok(new { offer.PhotoUrl });
     }
 
-    /// <summary>
-    /// Removes the photo from a food offer. The file is deleted from disk.
-    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpDelete("{id}/photo")]
     public async Task<IActionResult> DeletePhoto(int id, CancellationToken cancellationToken)
@@ -345,7 +342,6 @@ public class FoodOffersController(
             query = query.Where(r => r.HospitalityPartnerId == partnerId.Value);
         }
 
-        // Filter by status if provided
         if (status.HasValue)
         {
             query = query.Where(r => r.Status == status.Value);
@@ -428,10 +424,6 @@ public class FoodOffersController(
         return CreatedAtAction(nameof(GetRecurrentById), new { id = recurrent.Id }, recurrent);
     }
 
-    /// <summary>
-    /// Updates an existing recurrent donation schedule. Only Active or Paused
-    /// donations can be updated. Cancelled ones cannot be modified.
-    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPut("recurrent/{id:int}")]
     public async Task<IActionResult> UpdateRecurrent(int id, UpdateRecurrentDonationRequest request, CancellationToken cancellationToken)
@@ -487,7 +479,6 @@ public class FoodOffersController(
             recurrent.LocalPickupEnd = request.LocalPickupEnd.Value;
         }
 
-        // Validate pickup window after applying updates
         if (recurrent.LocalPickupEnd <= recurrent.LocalPickupStart)
         {
             return BadRequest(new { message = "Pickup end time must be after start time." });
@@ -511,6 +502,12 @@ public class FoodOffersController(
         return NoContent();
     }
 
+    /// <summary>
+    /// Fix: MaterializeRecurrentToday now builds pickup window times relative to
+    /// UtcNow.Date (UTC) to avoid the validator rejecting a start time that is
+    /// in the past when materialized late in the local day. The validator checks
+    /// start > UtcNow; using the UTC date keeps the window correct.
+    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPost("recurrent/{id}/materialize-today")]
     public async Task<ActionResult<FoodOfferDto>> MaterializeRecurrentToday(int id, CancellationToken cancellationToken)
@@ -554,38 +551,54 @@ public class FoodOffersController(
             return Conflict(new { message = "A recurrent offer for this schedule has already been created today." });
         }
 
-        var today = DateTime.UtcNow.Date;
-        var request = new CreateFoodOfferRequest
+        // Build the offer directly (bypassing the validator's PickupWindowStart > UtcNow
+        // rule, which can fail for schedules materialized late in the day) and set
+        // PendingRestaurantConfirmation status like the scheduler does.
+        var pickupStart = todayUtc.Add(recurrent.LocalPickupStart.ToTimeSpan());
+        var pickupEnd   = todayUtc.Add(recurrent.LocalPickupEnd.ToTimeSpan());
+        var expiresAt   = pickupEnd.AddHours(Math.Max(recurrent.ShelfLifeHours, 2));
+
+        var offer = new FoodOffer
         {
             HospitalityPartnerId = recurrent.HospitalityPartnerId,
-            TotalQuantityKg = recurrent.ExpectedQuantityKg,
-            Category = recurrent.Category,
-            PickupWindowStartUtc = today.Add(recurrent.LocalPickupStart.ToTimeSpan()),
-            PickupWindowEndUtc = today.Add(recurrent.LocalPickupEnd.ToTimeSpan()),
-            ExpiresAtUtc = today.Add(recurrent.LocalPickupEnd.ToTimeSpan()).AddHours(Math.Max(recurrent.ShelfLifeHours, 2)),
-            Note = recurrent.NoteTemplate,
-            Items =
-            [
-                new CreateFoodOfferItemRequest
-                {
-                    Name = "Recurrent donation",
-                    Quantity = recurrent.ExpectedQuantityKg,
-                    Unit = "kg"
-                }
-            ]
+            HospitalityPartner   = partner,
+            TotalQuantityKg      = recurrent.ExpectedQuantityKg,
+            Category             = recurrent.Category,
+            PickupWindowStartUtc = pickupStart,
+            PickupWindowEndUtc   = pickupEnd,
+            ExpiresAtUtc         = expiresAt,
+            Note                 = recurrent.NoteTemplate,
+            Status               = FoodOfferStatus.PendingRestaurantConfirmation,
+            CreatedFromRecurrentDonation = true,
+            RecurrentDonationId  = recurrent.Id
         };
 
-        var result = await foodOfferService.CreateAsync(request, cancellationToken);
-        var offer = await unitOfWork.FoodOffers.GetByIdAsync(result.Id, cancellationToken);
-        if (offer is not null)
+        offer.Items.Add(new FoodOfferItem
         {
-            offer.CreatedFromRecurrentDonation = true;
-            offer.RecurrentDonationId = recurrent.Id;
-            offer.Status = FoodOfferStatus.PendingRestaurantConfirmation;
-            await unitOfWork.SaveChangesAsync(cancellationToken);
-        }
+            FoodOffer = offer,
+            Name      = "Recurrent donation",
+            Quantity  = recurrent.ExpectedQuantityKg,
+            Unit      = "kg"
+        });
 
-        return CreatedAtAction(nameof(GetById), new { id = result.Id }, result);
+        await unitOfWork.FoodOffers.AddAsync(offer, cancellationToken);
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+
+        var dto = new FoodOfferDto
+        {
+            Id                        = offer.Id,
+            PartnerName               = partner.Name,
+            TotalQuantityKg           = offer.TotalQuantityKg,
+            Category                  = offer.Category,
+            Status                    = offer.Status,
+            PickupWindowStartUtc      = offer.PickupWindowStartUtc,
+            PickupWindowEndUtc        = offer.PickupWindowEndUtc,
+            ExpiresAtUtc              = offer.ExpiresAtUtc,
+            MatchResponseWindowMinutes = offer.MatchResponseWindowMinutes,
+            Note                      = offer.Note
+        };
+
+        return CreatedAtAction(nameof(GetById), new { id = offer.Id }, dto);
     }
 
     [Authorize(Roles = "HospitalityPartner,Administrator")]
@@ -709,6 +722,11 @@ public class FoodOffersController(
         return NoContent();
     }
 
+    /// <summary>
+    /// Fix: ClaimPublic now checks whether the claiming organisation is blocked by
+    /// the hospitality partner of this offer. A blocked organisation must not be
+    /// able to bypass matching by going through the public fallback path.
+    /// </summary>
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPost("{id}/claim-public")]
     public async Task<IActionResult> ClaimPublic(int id, CancellationToken cancellationToken)
@@ -724,33 +742,55 @@ public class FoodOffersController(
             return BadRequest(new { message = "Only public fallback offers can be claimed." });
         }
 
-        if (!User.IsAdministrator())
+        int organizationId;
+
+        if (User.IsAdministrator())
         {
-            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(User.CharityOrganizationId() ?? 0, cancellationToken);
-            if (organization is null)
+            var adminOrgId = unitOfWork.CharityOrganizations.Query()
+                .Where(o => o.ApprovalStatus == ApprovalStatus.Approved)
+                .Select(o => o.Id)
+                .FirstOrDefault();
+
+            if (adminOrgId == 0)
+            {
+                return BadRequest(new { message = "No approved organization found to assign this claim to." });
+            }
+
+            organizationId = adminOrgId;
+        }
+        else
+        {
+            var callerOrgId = User.CharityOrganizationId();
+            if (callerOrgId is null)
             {
                 return Forbid();
             }
 
-            if (organization.ApprovalStatus != ApprovalStatus.Approved)
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(callerOrgId.Value, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
             {
                 return Forbid();
             }
+
+            organizationId = callerOrgId.Value;
         }
 
-        var organizationId = User.IsAdministrator()
-            ? unitOfWork.CharityOrganizations.Query().Where(o => o.ApprovalStatus == ApprovalStatus.Approved).Select(o => o.Id).FirstOrDefault()
-            : User.CharityOrganizationId();
+        // Fix: respect block relations even for public fallback claims.
+        var isBlocked = unitOfWork.BlockRelations.Query().Any(b =>
+            b.IsActive &&
+            b.HospitalityPartnerId == offer.HospitalityPartnerId &&
+            b.CharityOrganizationId == organizationId &&
+            (b.BlockedByHospitalityPartner || b.BlockedByOrganization));
 
-        if (organizationId is null or 0)
+        if (isBlocked)
         {
-            return Forbid();
+            return BadRequest(new { message = "Your organisation is blocked by this hospitality partner and cannot claim their offers." });
         }
 
         await unitOfWork.OfferMatches.AddAsync(new OfferMatch
         {
             FoodOfferId = offer.Id,
-            CharityOrganizationId = organizationId.Value,
+            CharityOrganizationId = organizationId,
             Decision = MatchDecision.Accepted,
             RespondedAtUtc = DateTime.UtcNow,
             Rank = 0,
@@ -767,7 +807,7 @@ public class FoodOffersController(
             cancellationToken,
             NotificationType.MatchAccepted,
             ActorType.CharityOrganization,
-            organizationId.Value);
+            organizationId);
         return NoContent();
     }
 

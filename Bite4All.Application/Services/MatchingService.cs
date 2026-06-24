@@ -32,9 +32,6 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
             return [];
         }
 
-        // If matches already exist for this offer, return them without re-running the algorithm.
-        // Exception: if the offer was re-activated after a cancellation (Reserved→Active),
-        // existing matches may all be TimedOut/Declined — in that case re-run.
         var existingMatches = unitOfWork.OfferMatches.Query()
             .Where(m => m.FoodOfferId == foodOfferId)
             .OrderBy(m => m.Rank)
@@ -62,9 +59,6 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
                 }).ToList();
         }
 
-        // Fix: EF Core cannot translate DateTime.Date into SQL — use explicit range
-        // comparison so the WHERE clause executes server-side instead of pulling all
-        // rows into memory for client-side evaluation.
         var todayUtc = DateTime.UtcNow.Date;
         var tomorrowUtc = todayUtc.AddDays(1);
 
@@ -94,8 +88,6 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
             .GroupBy(b => b.ActorId)
             .ToDictionary(g => g.Key, g => g.Max(b => b.Level));
 
-        // Load only ACTIVE recipients for dietary compatibility check.
-        // Deactivated recipients no longer represent current dietary constraints.
         foreach (var organization in organizations.Where(o => o.Recipients.Count == 0))
         {
             organization.Recipients = unitOfWork.Recipients.Query()
@@ -103,7 +95,6 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
                 .ToList();
         }
 
-        var requiredDiet = offer.Items.Aggregate(DietaryTag.None, (current, item) => current | item.DietaryTags);
         var candidates = new List<(CharityOrganization Organization, decimal Score)>();
 
         foreach (var organization in organizations)
@@ -126,14 +117,20 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
                 continue;
             }
 
-            if (!IsDietCompatible(requiredDiet, organization.Recipients))
+            // Fix: dietary compatibility is checked per item, not as a union of all items.
+            // An offer with one halal and one non-halal item is NOT safe for a recipient
+            // requiring halal — the recipient might receive the non-halal item.
+            // A recipient is compatible with an item only if the item explicitly carries
+            // all the tags the recipient requires. An item with no tags satisfies only
+            // recipients who have no restrictions.
+            if (!IsOfferCompatibleWithRecipients(offer.Items, organization.Recipients))
             {
                 await AddSkippedMatchAsync(offer.Id, organization.Id, MatchDecision.SkippedByDiet, cancellationToken);
                 continue;
             }
 
             var distanceScore = CalculateDistanceScore(offer.HospitalityPartner, organization);
-            var dietScore = requiredDiet == DietaryTag.None ? 10 : 18;
+            var dietScore = offer.Items.All(i => i.DietaryTags == DietaryTag.None) ? 10 : 18;
             var capacityScore = Math.Min(20, remainingCapacity);
             var rotationScore = organization.LastReceivedAtUtc is null
                 ? 20
@@ -186,24 +183,59 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
     }
 
     /// <summary>
-    /// Returns true only when the offer's dietary tags satisfy EVERY active recipient
-    /// in the organisation. Deactivated recipients are excluded from this check.
+    /// Returns true only when EVERY active recipient in the organisation can safely
+    /// consume ALL items in the offer.
+    ///
+    /// Per-item semantics (fix over the old "union" approach):
+    ///   - A recipient with no restrictions accepts any item regardless of its tags.
+    ///   - A recipient with restrictions R needs EVERY item in the offer to carry ALL
+    ///     of those restriction flags. An item that doesn't claim the required tag is
+    ///     considered unsafe for that recipient — the offer is skipped for this org.
+    ///
+    /// This is the conservative but correct behaviour: if a peanut-free recipient
+    /// can't be guaranteed safety for every single item, the offer should not be
+    /// matched to this organisation.
     /// </summary>
-    private static bool IsDietCompatible(DietaryTag offerTags, IReadOnlyCollection<Recipient> activeRecipients)
+    private static bool IsOfferCompatibleWithRecipients(
+        IReadOnlyCollection<FoodOfferItem> items,
+        IReadOnlyCollection<Recipient> activeRecipients)
     {
         if (activeRecipients.Count == 0)
         {
             return true;
         }
 
-        if (offerTags == DietaryTag.None)
+        var restrictedRecipients = activeRecipients
+            .Where(r => r.DietaryRestrictions != DietaryTag.None)
+            .ToList();
+
+        if (restrictedRecipients.Count == 0)
         {
-            return activeRecipients.All(r => r.DietaryRestrictions == DietaryTag.None);
+            // No restrictions at all — compatible with any offer.
+            return true;
         }
 
-        return activeRecipients.All(r =>
-            r.DietaryRestrictions == DietaryTag.None ||
-            (offerTags & r.DietaryRestrictions) == r.DietaryRestrictions);
+        if (items.Count == 0)
+        {
+            // No item-level tags to check against — treat as compatible since
+            // item detail is unavailable (shouldn't happen but defensive).
+            return true;
+        }
+
+        // For each restricted recipient, every item must satisfy all their restrictions.
+        foreach (var recipient in restrictedRecipients)
+        {
+            foreach (var item in items)
+            {
+                // Check that every flag in recipient.DietaryRestrictions is also set on the item.
+                if ((item.DietaryTags & recipient.DietaryRestrictions) != recipient.DietaryRestrictions)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static decimal CalculateDistanceScore(HospitalityPartner partner, CharityOrganization organization)

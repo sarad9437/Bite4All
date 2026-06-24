@@ -31,7 +31,6 @@ public class PickupsController(
         PickupStatus.ProblemReported
     ];
 
-    // Statuses on which it makes no sense to report a new issue.
     private static readonly PickupStatus[] NonReportableStatuses =
     [
         PickupStatus.PickedUp,
@@ -243,6 +242,11 @@ public class PickupsController(
         return Ok(pickups.Select(ToDto).ToList());
     }
 
+    /// <summary>
+    /// Fix: also verifies that the claiming charity organisation is still Approved
+    /// before allowing the pickup document to be created. The organisation's status
+    /// could have changed (e.g. suspended) between the original match and this call.
+    /// </summary>
     [Authorize(Roles = "CharityOrganization,Administrator")]
     [HttpPost("from-match/{matchId}")]
     public async Task<ActionResult<PickupDocumentDto>> CreateFromMatch(int matchId, CancellationToken cancellationToken)
@@ -268,9 +272,13 @@ public class PickupsController(
             return Forbid();
         }
 
-        // Fix: do not allow creating a pickup document if the hospitality partner
-        // has been suspended since the match was created. A suspended partner cannot
-        // fulfill the donation and the pickup would be unresolvable.
+        // Fix: the claiming organisation must still be approved at the time of
+        // pickup document creation — it may have been suspended after the match.
+        if (!User.IsAdministrator() && match.CharityOrganization.ApprovalStatus != ApprovalStatus.Approved)
+        {
+            return BadRequest(new { message = "Cannot create a pickup document because your organisation account is not currently approved." });
+        }
+
         if (match.FoodOffer.HospitalityPartner.ApprovalStatus == ApprovalStatus.Suspended)
         {
             return BadRequest(new { message = "Cannot create a pickup document because the hospitality partner account is currently suspended." });
@@ -351,8 +359,6 @@ public class PickupsController(
             return Forbid();
         }
 
-        // Fix: the organization must still be approved at the time of assignment.
-        // It could have been suspended after the match was accepted.
         if (!User.IsAdministrator())
         {
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
@@ -687,9 +693,6 @@ public class PickupsController(
             return BadRequest(new { message = "Issue note is required." });
         }
 
-        // Fix: issues can only be reported on pickups that are still in progress.
-        // Reporting on a completed, cancelled, or already-problematic pickup makes no
-        // operational sense and would create confusing data in the system.
         if (NonReportableStatuses.Contains(pickup.Status))
         {
             return BadRequest(new
