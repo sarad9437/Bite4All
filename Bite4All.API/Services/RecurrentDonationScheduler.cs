@@ -3,12 +3,15 @@ using Bite4All.Application.Services;
 using Bite4All.Domain.Entities;
 using Bite4All.Domain.Enums;
 using Bite4All.Domain.Repositories;
-using Microsoft.EntityFrameworkCore;
 
 namespace Bite4All.API.Services;
 
 public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogger<RecurrentDonationScheduler> logger) : BackgroundService
 {
+    // Badge refresh runs once per hour, not every minute.
+    private DateTime _lastBadgeRefreshUtc = DateTime.MinValue;
+    private static readonly TimeSpan BadgeRefreshInterval = TimeSpan.FromHours(1);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
@@ -21,10 +24,18 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 await ProcessMatchTimeoutsAsync(stoppingToken);
                 await ResetExpiredTemporaryCapacitiesAsync(stoppingToken);
                 await CleanupExpiredIdempotencyRecordsAsync(stoppingToken);
+
+                // Refresh badges once per hour automatically so admins don't need to
+                // trigger it manually. This was previously only available via a POST endpoint.
+                if (DateTime.UtcNow - _lastBadgeRefreshUtc >= BadgeRefreshInterval)
+                {
+                    await RefreshBadgesAsync(stoppingToken);
+                    _lastBadgeRefreshUtc = DateTime.UtcNow;
+                }
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to process recurrent donations.");
+                logger.LogError(ex, "Failed during scheduler tick.");
             }
 
             await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
@@ -37,13 +48,6 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
         var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
         var notificationPublisher = scope.ServiceProvider.GetRequiredService<INotificationPublisher>();
 
-        // Fix: use local time consistently for both the schedule check AND the offer date.
-        // LocalCreationTime is defined in the partner's local timezone so it must be compared
-        // against DateTime.Now (local server time). Using DateTime.UtcNow.Date for todayUtc
-        // was inconsistent: a midnight UTC rollover could create offers one calendar day early
-        // or late depending on the server's timezone offset.
-        // We now derive todayLocal from DateTime.Now so that offer pickup windows align with
-        // the same local calendar day the schedule is triggered on.
         var nowLocal = DateTime.Now;
         var currentTime = TimeOnly.FromDateTime(nowLocal);
         var todayLocal = nowLocal.Date;
@@ -61,11 +65,6 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 continue;
             }
 
-            // Check whether this specific recurrent donation already produced an offer today.
-            // Key on both HospitalityPartnerId and RecurrentDonationId so a partner with
-            // multiple schedules doesn't have the second one silently skipped.
-            // Fix: use todayUtc for the DB date comparison (CreatedAtUtc is UTC) and todayLocal
-            // for computing pickup window times, keeping both sides of the logic consistent.
             var alreadyCreatedToday = unitOfWork.FoodOffers.Query().Any(o =>
                 o.CreatedFromRecurrentDonation &&
                 o.HospitalityPartnerId == recurrent.HospitalityPartnerId &&
@@ -82,8 +81,6 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 HospitalityPartnerId = recurrent.HospitalityPartnerId,
                 TotalQuantityKg = recurrent.ExpectedQuantityKg,
                 Category = recurrent.Category,
-                // Fix: use todayLocal (local calendar date) for pickup window so the times
-                // expressed in LocalPickupStart/LocalPickupEnd match what the partner expects.
                 PickupWindowStartUtc = todayLocal.Add(recurrent.LocalPickupStart.ToTimeSpan()),
                 PickupWindowEndUtc = todayLocal.Add(recurrent.LocalPickupEnd.ToTimeSpan()),
                 ExpiresAtUtc = todayLocal.Add(recurrent.LocalPickupEnd.ToTimeSpan()).AddHours(Math.Max(recurrent.ShelfLifeHours, 2)),
@@ -197,10 +194,7 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
         foreach (var match in candidateMatches)
         {
             var offer = await unitOfWork.FoodOffers.GetByIdAsync(match.FoodOfferId, cancellationToken);
-            if (offer is null)
-            {
-                continue;
-            }
+            if (offer is null) continue;
 
             var windowMinutes = Math.Max(offer.MatchResponseWindowMinutes, 1);
             if (match.NotifiedAtUtc!.Value.AddMinutes(windowMinutes) <= now)
@@ -212,10 +206,7 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
         foreach (var match in expiredMatches)
         {
             var offer = await unitOfWork.FoodOffers.GetByIdAsync(match.FoodOfferId, cancellationToken);
-            if (offer is null)
-            {
-                continue;
-            }
+            if (offer is null) continue;
 
             match.Decision = MatchDecision.TimedOut;
             match.RespondedAtUtc = DateTime.UtcNow;
@@ -225,7 +216,7 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
                 ActorType.CharityOrganization,
                 match.CharityOrganizationId,
                 "Match response window expired",
-                $"Your response window for Bite4All offer #{offer.Id} has expired and the offer has been passed to the next organization.",
+                $"Your response window for Bite4All offer #{offer.Id} has expired.",
                 cancellationToken,
                 NotificationType.MatchingOffer);
 
@@ -272,9 +263,7 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
             FoodOfferStatus.PublicFallback
         };
         var expiredOffers = unitOfWork.FoodOffers.Query()
-            .Where(o =>
-                o.ExpiresAtUtc <= now &&
-                expirableStatuses.Contains(o.Status))
+            .Where(o => o.ExpiresAtUtc <= now && expirableStatuses.Contains(o.Status))
             .ToList();
 
         foreach (var offer in expiredOffers)
@@ -323,12 +312,6 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
         }
     }
 
-    /// <summary>
-    /// Fix: IdempotencyRecord rows accumulate indefinitely because nothing removes them after
-    /// they expire. The record's ExpiresAtUtc is set to 7 days from creation/completion in
-    /// IdempotencyMiddleware. This cleanup task runs every minute alongside the other
-    /// scheduler tasks and purges any records whose window has passed, keeping the table small.
-    /// </summary>
     private async Task CleanupExpiredIdempotencyRecordsAsync(CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
@@ -339,10 +322,7 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
             .Where(r => r.ExpiresAtUtc <= now)
             .ToList();
 
-        if (expired.Count == 0)
-        {
-            return;
-        }
+        if (expired.Count == 0) return;
 
         foreach (var record in expired)
         {
@@ -351,5 +331,94 @@ public class RecurrentDonationScheduler(IServiceScopeFactory scopeFactory, ILogg
 
         await unitOfWork.SaveChangesAsync(cancellationToken);
         logger.LogInformation("Cleaned up {Count} expired idempotency records.", expired.Count);
+    }
+
+    /// <summary>
+    /// Automatically refreshes badges for all actors once per hour.
+    /// Mirrors the logic in ReputationController.RefreshBadges so admins
+    /// don't have to trigger it manually.
+    /// </summary>
+    private async Task RefreshBadgesAsync(CancellationToken cancellationToken)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+
+        // Hospitality partners
+        var partners = unitOfWork.HospitalityPartners.Query().ToList();
+        foreach (var partner in partners.Where(p => p.SuccessfulDonations >= 50))
+        {
+            var level = partner.SuccessfulDonations >= 500 && partner.TotalDonatedKg >= 2000 && partner.ReputationScore >= 4.5
+                ? BadgeLevel.Gold
+                : partner.SuccessfulDonations >= 200 && partner.TotalDonatedKg >= 500
+                    ? BadgeLevel.Silver
+                    : BadgeLevel.Bronze;
+
+            var alreadyAssigned = unitOfWork.BadgeAssignments.Query().Any(b =>
+                b.ActorType == ActorType.HospitalityPartner && b.ActorId == partner.Id &&
+                b.Level == level && !b.AssignedByAdmin);
+
+            if (alreadyAssigned) continue;
+
+            await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
+            {
+                ActorType = ActorType.HospitalityPartner,
+                ActorId = partner.Id,
+                Level = level,
+                Name = $"{level} donor"
+            }, cancellationToken);
+        }
+
+        // Charity organizations
+        var organizations = unitOfWork.CharityOrganizations.Query().ToList();
+        foreach (var organization in organizations.Where(o => o.AcceptedMatchCount >= 50))
+        {
+            var level = organization.AcceptedMatchCount >= 500 && organization.ReputationScore >= 4.5
+                ? BadgeLevel.Gold
+                : organization.AcceptedMatchCount >= 200
+                    ? BadgeLevel.Silver
+                    : BadgeLevel.Bronze;
+
+            var alreadyAssigned = unitOfWork.BadgeAssignments.Query().Any(b =>
+                b.ActorType == ActorType.CharityOrganization && b.ActorId == organization.Id &&
+                b.Level == level && !b.AssignedByAdmin);
+
+            if (alreadyAssigned) continue;
+
+            await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
+            {
+                ActorType = ActorType.CharityOrganization,
+                ActorId = organization.Id,
+                Level = level,
+                Name = $"{level} recipient"
+            }, cancellationToken);
+        }
+
+        // Drivers
+        var drivers = unitOfWork.Drivers.Query().ToList();
+        foreach (var driver in drivers.Where(d => d.CompletedPickups >= 50))
+        {
+            var level = driver.CompletedPickups >= 500 && driver.ReputationScore >= 4.5
+                ? BadgeLevel.Gold
+                : driver.CompletedPickups >= 200
+                    ? BadgeLevel.Silver
+                    : BadgeLevel.Bronze;
+
+            var alreadyAssigned = unitOfWork.BadgeAssignments.Query().Any(b =>
+                b.ActorType == ActorType.Driver && b.ActorId == driver.Id &&
+                b.Level == level && !b.AssignedByAdmin);
+
+            if (alreadyAssigned) continue;
+
+            await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
+            {
+                ActorType = ActorType.Driver,
+                ActorId = driver.Id,
+                Level = level,
+                Name = $"{level} driver"
+            }, cancellationToken);
+        }
+
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Badge refresh completed.");
     }
 }

@@ -32,26 +32,34 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
             return [];
         }
 
+        // If matches already exist for this offer, return them without re-running the algorithm.
+        // Exception: if the offer was re-activated after a cancellation (Reserved→Active),
+        // existing matches may all be TimedOut/Declined — in that case re-run.
         var existingMatches = unitOfWork.OfferMatches.Query()
             .Where(m => m.FoodOfferId == foodOfferId)
             .OrderBy(m => m.Rank)
             .ToList();
 
-        if (existingMatches.Count > 0)
+        var hasPendingOrAccepted = existingMatches.Any(m =>
+            m.Decision == MatchDecision.Pending || m.Decision == MatchDecision.Accepted);
+
+        if (existingMatches.Count > 0 && hasPendingOrAccepted)
         {
             var organizationIds = existingMatches.Select(m => m.CharityOrganizationId).Distinct().ToList();
             var organizationLookup = unitOfWork.CharityOrganizations.Query()
                 .Where(o => organizationIds.Contains(o.Id))
                 .ToDictionary(o => o.Id, o => o.Name);
 
-            return existingMatches.Select(m => new MatchCandidateDto
-            {
-                OrganizationId = m.CharityOrganizationId,
-                OrganizationName = organizationLookup.GetValueOrDefault(m.CharityOrganizationId, string.Empty),
-                Score = m.Score,
-                Rank = m.Rank,
-                Decision = m.Decision
-            }).ToList();
+            return existingMatches
+                .Where(m => m.Rank > 0)
+                .Select(m => new MatchCandidateDto
+                {
+                    OrganizationId = m.CharityOrganizationId,
+                    OrganizationName = organizationLookup.GetValueOrDefault(m.CharityOrganizationId, string.Empty),
+                    Score = m.Score,
+                    Rank = m.Rank,
+                    Decision = m.Decision
+                }).ToList();
         }
 
         var usedCapacity = unitOfWork.PickupDocuments.Query()
@@ -77,12 +85,15 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
             .GroupBy(b => b.ActorId)
             .ToDictionary(g => g.Key, g => g.Max(b => b.Level));
 
+        // Fix: load only ACTIVE recipients for dietary compatibility check.
+        // Deactivated recipients no longer represent current dietary constraints.
         foreach (var organization in organizations.Where(o => o.Recipients.Count == 0))
         {
-            organization.Recipients = unitOfWork.Recipients.Query().Where(r => r.CharityOrganizationId == organization.Id).ToList();
+            organization.Recipients = unitOfWork.Recipients.Query()
+                .Where(r => r.CharityOrganizationId == organization.Id && r.IsActive)
+                .ToList();
         }
 
-        // Build the aggregate dietary tag of the offer (union of all item tags).
         var requiredDiet = offer.Items.Aggregate(DietaryTag.None, (current, item) => current | item.DietaryTags);
         var candidates = new List<(CharityOrganization Organization, decimal Score)>();
 
@@ -106,12 +117,6 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
                 continue;
             }
 
-            // Fix 7: IsDietCompatible previously used Any() — meaning if even one recipient
-            // could eat the food the organisation was considered compatible, even if 9 out of
-            // 10 recipients cannot. The spec says "the system does not send food with gluten
-            // to an organisation if it knows its recipients cannot have gluten."
-            // Correct interpretation: ALL recipients must be able to eat the food (i.e. the
-            // food must satisfy every recipient's dietary restrictions).
             if (!IsDietCompatible(requiredDiet, organization.Recipients))
             {
                 await AddSkippedMatchAsync(offer.Id, organization.Id, MatchDecision.SkippedByDiet, cancellationToken);
@@ -172,40 +177,22 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
     }
 
     /// <summary>
-    /// Fix 7: returns true only when the offer's dietary tags are compatible with
-    /// EVERY recipient in the organisation.
-    ///
-    /// Semantics of the flags:
-    ///   • DietaryTag on a FoodOfferItem describes what the food IS
-    ///     (e.g. GlutenFree means the item contains no gluten).
-    ///   • DietaryTag on a Recipient describes what the recipient CANNOT eat
-    ///     (their restrictions/allergies).
-    ///
-    /// A recipient with restriction R is safe if and only if the offer contains the
-    /// matching "free-from" tag — i.e. (offerTags & restriction) == restriction.
-    ///
-    /// Edge cases:
-    ///   • No offer tags (None) → food has no special claims → compatible only if
-    ///     no recipient has restrictions (conservative: reject if any restriction exists
-    ///     and the food makes no claims about it).
-    ///   • No recipients → no restrictions to violate → always compatible.
+    /// Returns true only when the offer's dietary tags satisfy EVERY active recipient
+    /// in the organisation. Deactivated recipients are excluded from this check.
     /// </summary>
-    private static bool IsDietCompatible(DietaryTag offerTags, IReadOnlyCollection<Recipient> recipients)
+    private static bool IsDietCompatible(DietaryTag offerTags, IReadOnlyCollection<Recipient> activeRecipients)
     {
-        if (recipients.Count == 0)
+        if (activeRecipients.Count == 0)
         {
             return true;
         }
 
-        // If the offer makes no dietary claims but some recipients have restrictions,
-        // we cannot guarantee safety — exclude this organisation.
         if (offerTags == DietaryTag.None)
         {
-            return recipients.All(r => r.DietaryRestrictions == DietaryTag.None);
+            return activeRecipients.All(r => r.DietaryRestrictions == DietaryTag.None);
         }
 
-        // Every recipient must have all their restrictions satisfied by the offer.
-        return recipients.All(r =>
+        return activeRecipients.All(r =>
             r.DietaryRestrictions == DietaryTag.None ||
             (offerTags & r.DietaryRestrictions) == r.DietaryRestrictions);
     }
@@ -218,18 +205,15 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
         return Math.Max(0, 25 - roughDistance * 10);
     }
 
-    private static decimal GetBadgeBonus(BadgeLevel? badgeLevel)
+    private static decimal GetBadgeBonus(BadgeLevel? badgeLevel) => badgeLevel switch
     {
-        return badgeLevel switch
-        {
-            BadgeLevel.Platinum => 4m,
-            BadgeLevel.Gold     => 2m,
-            BadgeLevel.Silver   => 0.75m,
-            BadgeLevel.Bronze   => 0.25m,
-            BadgeLevel.Special  => 1m,
-            _                   => 0m
-        };
-    }
+        BadgeLevel.Platinum => 4m,
+        BadgeLevel.Gold     => 2m,
+        BadgeLevel.Silver   => 0.75m,
+        BadgeLevel.Bronze   => 0.25m,
+        BadgeLevel.Special  => 1m,
+        _                   => 0m
+    };
 
     private static decimal GetCompensationBonus(CharityOrganization organization)
     {

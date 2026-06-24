@@ -166,9 +166,6 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
 
         var totalKg = pickups.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg);
 
-        // Fix: apply the same date range to distributions so the organization impact report
-        // is internally consistent — when the caller filters by period, meals and recipients
-        // must also reflect only that period, not all-time totals.
         var distributionsQuery = unitOfWork.RecipientMealDistributions.Query()
             .Where(d => d.CharityOrganizationId == charityOrganizationId);
 
@@ -305,60 +302,33 @@ public class ImpactReportService(IUnitOfWork unitOfWork) : IImpactReportService
     private static string GetNextOrganizationBadgeHint(int acceptedMatchCount, double reputationScore)
     {
         if (acceptedMatchCount < 50)
-        {
             return $"Bronze badge at 50 accepted pickups ({50 - acceptedMatchCount} remaining).";
-        }
-
         if (acceptedMatchCount < 200)
-        {
             return "Silver badge at 200 accepted pickups.";
-        }
-
         if (acceptedMatchCount < 500 || reputationScore < 4.5)
-        {
             return "Gold badge at 500 accepted pickups and 4.5 reputation.";
-        }
-
         return "Eligible for manual Platinum or special community badge review.";
     }
 
     private static string GetNextBadgeHint(int successfulDonations, decimal totalDonatedKg, double reputationScore)
     {
         if (successfulDonations < 50)
-        {
             return $"Bronze badge at 50 successful donations ({50 - successfulDonations} remaining).";
-        }
-
         if (successfulDonations < 200 || totalDonatedKg < 500)
-        {
             return "Silver badge at 200 successful donations and 500kg donated.";
-        }
-
         if (successfulDonations < 500 || totalDonatedKg < 2000 || reputationScore < 4.5)
-        {
             return "Gold badge at 500 successful donations, 2000kg donated and 4.5 reputation.";
-        }
-
         return "Eligible for manual Platinum or special community badge review.";
     }
 
     private static string GetNextDriverBadgeHint(int completedPickups, double reputationScore)
     {
         if (completedPickups < 50)
-        {
             return $"Bronze badge at 50 completed pickups ({50 - completedPickups} remaining).";
-        }
-
         if (completedPickups < 200)
-        {
             return "Silver badge at 200 completed pickups.";
-        }
-
         if (completedPickups < 500 || reputationScore < 4.5)
-        {
             return "Gold badge at 500 completed pickups and 4.5 reputation.";
-        }
-
         return "Eligible for manual Platinum or special community badge review.";
     }
 
