@@ -62,8 +62,17 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
                 }).ToList();
         }
 
+        // Fix: EF Core cannot translate DateTime.Date into SQL — use explicit range
+        // comparison so the WHERE clause executes server-side instead of pulling all
+        // rows into memory for client-side evaluation.
+        var todayUtc = DateTime.UtcNow.Date;
+        var tomorrowUtc = todayUtc.AddDays(1);
+
         var usedCapacity = unitOfWork.PickupDocuments.Query()
-            .Where(p => p.CreatedAtUtc.Date == DateTime.UtcNow.Date && p.Status != PickupStatus.Cancelled)
+            .Where(p =>
+                p.CreatedAtUtc >= todayUtc &&
+                p.CreatedAtUtc < tomorrowUtc &&
+                p.Status != PickupStatus.Cancelled)
             .GroupBy(p => p.CharityOrganizationId)
             .Select(g => new { OrganizationId = g.Key, TotalKg = g.Sum(p => p.ActualQuantityKg ?? p.PlannedQuantityKg) })
             .ToDictionary(x => x.OrganizationId, x => x.TotalKg);
@@ -85,7 +94,7 @@ public class MatchingService(IUnitOfWork unitOfWork) : IMatchingService
             .GroupBy(b => b.ActorId)
             .ToDictionary(g => g.Key, g => g.Max(b => b.Level));
 
-        // Fix: load only ACTIVE recipients for dietary compatibility check.
+        // Load only ACTIVE recipients for dietary compatibility check.
         // Deactivated recipients no longer represent current dietary constraints.
         foreach (var organization in organizations.Where(o => o.Recipients.Count == 0))
         {

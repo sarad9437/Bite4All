@@ -35,7 +35,6 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             return BadRequest(new { message = "Rating must be between 1 and 5." });
         }
 
-        // Fix: aktor ne može da ocenjuje sam sebe.
         if (request.ReviewerActorType == request.RatedActorType && request.ReviewerActorId == request.RatedActorId)
         {
             return BadRequest(new { message = "An actor cannot rate themselves." });
@@ -91,9 +90,15 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
         };
 
         await unitOfWork.ReputationEntries.AddAsync(rating, cancellationToken);
+
+        // Fix: recalculate score first so that RecordSnapshotAsync captures the
+        // NEW score, not the pre-rating value. Previously the snapshot was recorded
+        // before SaveChanges propagated the recalculated score, meaning it always
+        // contained the old score. A single SaveChanges at the end is enough.
         await RecalculateScoreAsync(request.RatedActorType, request.RatedActorId, cancellationToken);
         await RecordSnapshotAsync(request.RatedActorType, request.RatedActorId, "Rating", cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
+
         return Ok(rating);
     }
 
@@ -236,6 +241,10 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
         return details is null ? NotFound() : Ok(details);
     }
 
+    // ----------------------------------------------------------------
+    // Private helpers
+    // ----------------------------------------------------------------
+
     private async Task RecalculateScoreAsync(ActorType actorType, int actorId, CancellationToken cancellationToken)
     {
         var ratings = unitOfWork.ReputationEntries.Query()
@@ -276,6 +285,37 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
         var cancellationRate = cancellations / (double)Math.Max(1, cancellations + 5);
         var score = averageRating * 0.4 + confirmationRate * 5 * 0.3 + (1 - cancellationRate) * 5 * 0.3;
         return Math.Round(Math.Clamp(score, 1, 5), 2);
+    }
+
+    /// <summary>
+    /// Records a reputation snapshot capturing the actor's score AFTER
+    /// RecalculateScoreAsync has already updated it in the EF change tracker.
+    /// Because SaveChanges has not yet been called, we read the score directly
+    /// from the in-memory tracked entity rather than re-querying the database,
+    /// which would return the stale persisted value.
+    /// </summary>
+    private async Task RecordSnapshotAsync(ActorType actorType, int actorId, string source, CancellationToken cancellationToken)
+    {
+        double? score = actorType switch
+        {
+            ActorType.HospitalityPartner =>
+                (await unitOfWork.HospitalityPartners.GetByIdAsync(actorId, cancellationToken))?.ReputationScore,
+            ActorType.CharityOrganization =>
+                (await unitOfWork.CharityOrganizations.GetByIdAsync(actorId, cancellationToken))?.ReputationScore,
+            ActorType.Driver =>
+                (await unitOfWork.Drivers.GetByIdAsync(actorId, cancellationToken))?.ReputationScore,
+            _ => null
+        };
+
+        if (!score.HasValue) return;
+
+        await unitOfWork.ReputationSnapshots.AddAsync(new ReputationSnapshot
+        {
+            ActorType = actorType,
+            ActorId = actorId,
+            Score = score.Value,
+            Source = source
+        }, cancellationToken);
     }
 
     private async Task<ActorReputationDetailsDto?> GetHospitalityPartnerReputationAsync(int actorId, CancellationToken cancellationToken)
@@ -354,26 +394,5 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
                 .Select(r => new ReputationHistoryDto { RecordedAtUtc = r.CreatedAtUtc, Score = r.Score, Source = r.Source })
                 .ToList()
         };
-    }
-
-    private async Task RecordSnapshotAsync(ActorType actorType, int actorId, string source, CancellationToken cancellationToken)
-    {
-        var score = actorType switch
-        {
-            ActorType.HospitalityPartner => (await unitOfWork.HospitalityPartners.GetByIdAsync(actorId, cancellationToken))?.ReputationScore,
-            ActorType.CharityOrganization => (await unitOfWork.CharityOrganizations.GetByIdAsync(actorId, cancellationToken))?.ReputationScore,
-            ActorType.Driver => (await unitOfWork.Drivers.GetByIdAsync(actorId, cancellationToken))?.ReputationScore,
-            _ => null
-        };
-
-        if (!score.HasValue) return;
-
-        await unitOfWork.ReputationSnapshots.AddAsync(new ReputationSnapshot
-        {
-            ActorType = actorType,
-            ActorId = actorId,
-            Score = score.Value,
-            Source = source
-        }, cancellationToken);
     }
 }
