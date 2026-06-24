@@ -37,6 +37,8 @@ project.assets.json
 logs/
 
 # Local configuration and secrets
+# appsettings.Development.json contains seed passwords and the dev JWT key —
+# never commit it. Each developer copies the .example file and fills in values.
 appsettings.Development.json
 appsettings.Local.json
 appsettings.*.Local.json
@@ -55,6 +57,10 @@ appsettings.Production.json
 *.sqlite3
 *.mdf
 *.ldf
+
+# Uploaded files (food offer photos etc.)
+# These are generated at runtime and must not be committed.
+**/wwwroot/uploads/
 
 # Publish and deployment artifacts
 publish/

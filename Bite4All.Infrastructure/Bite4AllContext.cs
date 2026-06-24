@@ -45,10 +45,18 @@ public class Bite4AllContext(DbContextOptions<Bite4AllContext> options) : Identi
     {
         base.OnModelCreating(builder);
 
+        // ----------------------------------------------------------------
+        // Seed data
+        // ----------------------------------------------------------------
+
         builder.Entity<City>().HasData(
             new City { Id = 1, Name = "Beograd", IsActive = true },
             new City { Id = 2, Name = "Novi Sad", IsActive = true },
             new City { Id = 3, Name = "Nis", IsActive = true });
+
+        // ----------------------------------------------------------------
+        // Precision / scale
+        // ----------------------------------------------------------------
 
         builder.Entity<HospitalityPartner>().Property(p => p.TotalDonatedKg).HasPrecision(10, 2);
         builder.Entity<HospitalityPartner>().Property(p => p.Latitude).HasPrecision(9, 6);
@@ -74,7 +82,10 @@ public class Bite4AllContext(DbContextOptions<Bite4AllContext> options) : Identi
         builder.Entity<SpecialCampaign>().Property(c => c.TargetQuantityKg).HasPrecision(10, 2);
         builder.Entity<SpecialCampaign>().Property(c => c.CurrentQuantityKg).HasPrecision(10, 2);
         builder.Entity<RecurrentDonation>().Property(r => r.ExpectedQuantityKg).HasPrecision(10, 2);
-        builder.Entity<ReputationSnapshot>().HasIndex(r => new { r.ActorType, r.ActorId, r.CreatedAtUtc });
+
+        // ----------------------------------------------------------------
+        // Relationships
+        // ----------------------------------------------------------------
 
         builder.Entity<FoodOffer>()
             .HasMany(o => o.Items)
@@ -88,6 +99,10 @@ public class Bite4AllContext(DbContextOptions<Bite4AllContext> options) : Identi
             .HasForeignKey(m => m.FoodOfferId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // ----------------------------------------------------------------
+        // Unique indexes
+        // ----------------------------------------------------------------
+
         builder.Entity<BlockRelation>()
             .HasIndex(b => new { b.HospitalityPartnerId, b.CharityOrganizationId })
             .IsUnique();
@@ -100,9 +115,44 @@ public class Bite4AllContext(DbContextOptions<Bite4AllContext> options) : Identi
             .HasIndex(r => new { r.CharityOrganizationId, r.InternalCode })
             .IsUnique();
 
+        // ----------------------------------------------------------------
+        // Performance indexes
+        // ----------------------------------------------------------------
+
+        // ReputationSnapshot — heavily filtered by actor
+        builder.Entity<ReputationSnapshot>().HasIndex(r => new { r.ActorType, r.ActorId, r.CreatedAtUtc });
+
+        // FoodOffers — scheduler + search filter by Status and ExpiresAtUtc constantly
+        builder.Entity<FoodOffer>().HasIndex(o => o.Status);
+        builder.Entity<FoodOffer>().HasIndex(o => o.ExpiresAtUtc);
+        builder.Entity<FoodOffer>().HasIndex(o => o.HospitalityPartnerId);
+
+        // OfferMatches — matching and cascade queries always filter by FoodOfferId
+        builder.Entity<OfferMatch>()
+            .HasIndex(m => new { m.FoodOfferId, m.CharityOrganizationId });
+        builder.Entity<OfferMatch>().HasIndex(m => m.CharityOrganizationId);
+
+        // PickupDocuments — frequently filtered by status, driver and organization
+        builder.Entity<PickupDocument>().HasIndex(p => p.Status);
+        builder.Entity<PickupDocument>().HasIndex(p => p.FoodOfferId);
+        builder.Entity<PickupDocument>().HasIndex(p => p.HospitalityPartnerId);
+        builder.Entity<PickupDocument>().HasIndex(p => p.CharityOrganizationId);
+        builder.Entity<PickupDocument>().HasIndex(p => p.DriverId);
+        builder.Entity<PickupDocument>().HasIndex(p => p.VehicleId);
+
+        // Notifications — always queried by (RecipientType, RecipientId)
+        builder.Entity<Notification>()
+            .HasIndex(n => new { n.RecipientType, n.RecipientId });
+
+        // ReputationEntries — score recalculation queries by (RatedActorType, RatedActorId)
+        builder.Entity<ReputationEntry>()
+            .HasIndex(r => new { r.RatedActorType, r.RatedActorId });
+
+        // RecipientMealDistributions
         builder.Entity<RecipientMealDistribution>()
             .HasIndex(d => new { d.PickupDocumentId, d.RecipientId });
 
+        // IdempotencyRecords
         builder.Entity<IdempotencyRecord>().Property(r => r.RouteKey).HasMaxLength(450);
         builder.Entity<IdempotencyRecord>().Property(r => r.RequestHash).HasMaxLength(128);
         builder.Entity<IdempotencyRecord>().Property(r => r.ResponseContentType).HasMaxLength(256);

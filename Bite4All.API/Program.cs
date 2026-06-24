@@ -55,6 +55,23 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAudience = jwtOptions.Audience,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.Key))
         };
+
+        // Allow SignalR hub connections to pass the JWT token via query string,
+        // since WebSocket connections cannot set Authorization headers.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) &&
+                    path.StartsWithSegments("/hubs"))
+                {
+                    context.Token = accessToken;
+                }
+                return Task.CompletedTask;
+            }
+        };
     });
 
 builder.Services.AddAuthorization();
@@ -73,17 +90,23 @@ builder.Services.AddCors(options =>
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
 
+// Infrastructure
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+
+// Application services
 builder.Services.AddScoped<IMatchingService, MatchingService>();
 builder.Services.AddScoped<IImpactReportService, ImpactReportService>();
 builder.Services.AddScoped<IFoodOfferService, FoodOfferService>();
+builder.Services.AddScoped<ICsvExportService, CsvExportService>();  // Fix: was missing from DI registration
+
+// API services
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 
 // Register all validators from the API assembly (CreateFoodOfferRequestValidator,
-// UpdateFoodOfferRequestValidator, AssignPickupRequestValidator, etc.)
+// UpdateFoodOfferRequestValidator, AssignPickupRequestValidator, CompletePickupRequestValidator, etc.)
 builder.Services.AddValidatorsFromAssemblyContaining<CreateFoodOfferRequestValidator>();
 
-builder.Services.AddScoped<Bite4All.API.Hubs.INotificationPublisher, SignalRNotificationPublisher>();
+builder.Services.AddScoped<INotificationPublisher, SignalRNotificationPublisher>();
 builder.Services.AddHostedService<RecurrentDonationScheduler>();
 
 var app = builder.Build();
@@ -98,7 +121,13 @@ if (app.Environment.IsDevelopment())
 app.UseMiddleware<IdempotencyMiddleware>();
 app.UseCors("Bite4AllClient");
 app.UseHttpsRedirection();
+
+// Ensure wwwroot exists so StaticFiles middleware does not throw on startup
+// when no files have been uploaded yet.
+var wwwroot = Path.Combine(app.Environment.ContentRootPath, "wwwroot");
+Directory.CreateDirectory(wwwroot);
 app.UseStaticFiles();
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
