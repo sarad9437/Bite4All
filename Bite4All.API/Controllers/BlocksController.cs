@@ -48,9 +48,14 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
 
     /// <summary>
     /// Vraća blokade u kojima učestvuje trenutno autentifikovani aktor.
+    /// Fix: ovaj endpoint je ranije vraćao kompletnu listu bez paginacije —
+    /// problematično za partnere/organizacije sa puno akumuliranih blokada.
     /// </summary>
     [HttpGet("my")]
-    public ActionResult<List<BlockRelation>> GetMine(CancellationToken cancellationToken)
+    public ActionResult<PagedResult<BlockRelation>> GetMine(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
     {
         var partnerId = User.HospitalityPartnerId();
         var orgId = User.CharityOrganizationId();
@@ -77,11 +82,27 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
             query = query.Where(b => b.CharityOrganizationId == orgId.Value);
         }
 
-        return Ok(query.ToList());
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var totalCount = query.Count();
+        var items = query
+            .OrderByDescending(b => b.CreatedAtUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<BlockRelation>
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     [HttpPost]
-    public async Task<ActionResult<BlockRelation>> Create(CreateBlockRequest request, CancellationToken cancellationToken)
+    public async Task<ActionResult<BlockRelation>> Create(Bite4All.Application.DTOs.Common.CreateBlockRequest request, CancellationToken cancellationToken)
     {
         if (!User.IsAdministrator())
         {

@@ -1,6 +1,7 @@
 using Bite4All.API.Authorization;
 using Bite4All.API.Hubs;
 using Bite4All.API.Validators;
+using Bite4All.Application.DTOs.Common;
 using Bite4All.Application.DTOs.Pickups;
 using Bite4All.Domain.Entities;
 using Bite4All.Domain.Enums;
@@ -17,6 +18,7 @@ namespace Bite4All.API.Controllers;
 public class PickupsController(
     IUnitOfWork unitOfWork,
     IValidator<AssignPickupRequest> assignValidator,
+    IValidator<CompletePickupRequest> completeValidator,
     INotificationPublisher notificationPublisher,
     IHubContext<NotificationsHub> hubContext) : ControllerBase
 {
@@ -48,12 +50,19 @@ public class PickupsController(
         return Ok(ToDto(pickup));
     }
 
+    /// <summary>
+    /// Fix: this admin listing previously returned every pickup document in the system
+    /// in a single response with no paging, which does not scale as the table grows.
+    /// Now returns a PagedResult consistent with the other list endpoints in the API.
+    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpGet]
-    public ActionResult<List<PickupDocumentDto>> GetAll(
+    public ActionResult<PagedResult<PickupDocumentDto>> GetAll(
         [FromQuery] PickupStatus? status = null,
         [FromQuery] DateTime? fromUtc = null,
         [FromQuery] DateTime? toUtc = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
         CancellationToken cancellationToken = default)
     {
         var query = unitOfWork.PickupDocuments.Query().AsQueryable();
@@ -73,8 +82,23 @@ public class PickupsController(
             query = query.Where(p => p.CreatedAtUtc <= toUtc.Value);
         }
 
-        var pickups = query.OrderByDescending(p => p.CreatedAtUtc).ToList();
-        return Ok(pickups.Select(p => ToDto(p)).ToList());
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var totalCount = query.Count();
+        var pickups = query
+            .OrderByDescending(p => p.CreatedAtUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<PickupDocumentDto>
+        {
+            Items = pickups.Select(p => ToDto(p)).ToList(),
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     [Authorize(Roles = "Driver,Administrator")]
@@ -240,12 +264,6 @@ public class PickupsController(
             return Forbid();
         }
 
-        // Fix #2 (defense-in-depth): an Accepted match is only meaningful while its underlying
-        // offer is still in a state where delivery can actually happen. FoodOffersController.Cancel
-        // now flips the match's Decision away from Accepted as soon as the offer is cancelled, but
-        // we guard here too so a pickup document can never be created against a dead offer even if
-        // the match decision was left stale by some other path (e.g. direct data manipulation,
-        // future code paths that forget to update the match).
         if (match.FoodOffer.Status is not (FoodOfferStatus.Reserved or FoodOfferStatus.Active or FoodOfferStatus.PublicFallback))
         {
             return BadRequest(new { message = "This offer is no longer available — it may have been cancelled, expired, or already completed." });
@@ -332,9 +350,19 @@ public class PickupsController(
             return BadRequest(new { message = "Driver and vehicle must belong to the pickup organization." });
         }
 
+        if (!driver.IsActive)
+        {
+            return BadRequest(new { message = "Driver account is suspended and cannot be assigned to pickups." });
+        }
+
         if (!driver.IsAvailable)
         {
             return BadRequest(new { message = "Driver is not available for new pickups." });
+        }
+
+        if (!vehicle.IsActive)
+        {
+            return BadRequest(new { message = "Vehicle is deactivated and cannot be assigned to pickups." });
         }
 
         if (!vehicle.IsAvailable)
@@ -412,10 +440,22 @@ public class PickupsController(
         return NoContent();
     }
 
+    /// <summary>
+    /// Fix: ActualQuantityKg was previously never validated at this entry point —
+    /// the CompletePickupRequestValidator existed but was not injected/invoked here,
+    /// so zero, negative, or absurdly large quantities could be persisted and would
+    /// silently corrupt impact/CO2 reports.
+    /// </summary>
     [Authorize(Roles = "Driver,Administrator")]
     [HttpPut("{id}/complete")]
     public async Task<IActionResult> Complete(int id, CompletePickupRequest request, CancellationToken cancellationToken)
     {
+        var validationResult = completeValidator.Validate(request);
+        if (!validationResult.IsValid)
+        {
+            return BadRequest(validationResult.Errors.Select(e => new { e.PropertyName, e.ErrorMessage }));
+        }
+
         var pickup = unitOfWork.PickupDocuments.Query().FirstOrDefault(p => p.Id == id);
         if (pickup is not null)
         {
@@ -443,11 +483,6 @@ public class PickupsController(
         pickup.PickedUpAtUtc = DateTime.UtcNow;
         pickup.Status = PickupStatus.PickedUp;
 
-        // Fix: food offer is marked Completed when the driver physically picks up the food from
-        // the restaurant — that is the moment the restaurant's obligation ends. Partner impact
-        // statistics (SuccessfulDonations, TotalDonatedKg) are updated at DeliverToOrganization
-        // when the donation is truly confirmed end-to-end, avoiding inflated counts in the rare
-        // case where a vehicle incident prevents delivery after pickup.
         pickup.FoodOffer.Status = FoodOfferStatus.Completed;
 
         if (pickup.FoodOffer?.SpecialCampaignId is int specialCampaignId)
@@ -509,10 +544,6 @@ public class PickupsController(
             }, cancellationToken);
         }
 
-        // Fix: SuccessfulDonations and TotalDonatedKg are credited to the partner here, at actual
-        // delivery confirmation, not at PickedUp. A donation is only "successful" when the food
-        // reaches the organization. Moving it here prevents inflated statistics in edge cases where
-        // the driver picks up food but cannot complete the delivery.
         pickup.HospitalityPartner ??= await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
         if (pickup.HospitalityPartner is not null)
         {
@@ -574,7 +605,7 @@ public class PickupsController(
 
         if (pickup.Status is not (PickupStatus.Assigned or PickupStatus.DriverConfirmed or PickupStatus.PickedUp))
         {
-            return BadRequest(new { message = "Driver location can only be updated for active pickups." });
+            return BadRequest(new { message = "Driver location can only be updated for active pickups (assigned, confirmed, or in transit after pickup)." });
         }
 
         pickup.Driver ??= await unitOfWork.Drivers.GetByIdAsync(pickup.DriverId.Value, cancellationToken);
@@ -583,7 +614,6 @@ public class PickupsController(
             return NotFound();
         }
 
-        // Fix 14: verify the driver belongs to the organization that owns this pickup.
         if (!User.IsAdministrator() && pickup.Driver.CharityOrganizationId != pickup.CharityOrganizationId)
         {
             return Forbid();
@@ -615,7 +645,7 @@ public class PickupsController(
 
     [Authorize(Roles = "Driver,CharityOrganization,Administrator")]
     [HttpPost("{id}/issues")]
-    public async Task<ActionResult<PickupIssue>> ReportIssue(int id, CreatePickupIssueRequest request, CancellationToken cancellationToken)
+    public async Task<ActionResult<PickupIssue>> ReportIssue(int id, Bite4All.Application.DTOs.Pickups.CreatePickupIssueRequest request, CancellationToken cancellationToken)
     {
         var pickup = await unitOfWork.PickupDocuments.GetByIdAsync(id, cancellationToken);
         if (pickup is null)
@@ -646,7 +676,6 @@ public class PickupsController(
 
         if (request.IssueType == PickupIssueType.FoodUnavailable)
         {
-            // Partner's fault — penalise partner, compensate organisation.
             var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
             if (partner is not null)
             {
@@ -676,7 +705,6 @@ public class PickupsController(
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
             if (organization is not null)
             {
-                // Compensate the organisation — they wasted a trip through no fault of their own.
                 organization.LastReceivedAtUtc = null;
                 organization.MatchCompensationBonus = Math.Max(organization.MatchCompensationBonus, 3m);
                 organization.MatchCompensationExpiresAtUtc = DateTime.UtcNow.AddDays(3);
@@ -690,7 +718,6 @@ public class PickupsController(
         }
         else if (request.IssueType is PickupIssueType.DriverUnavailable or PickupIssueType.LateArrival)
         {
-            // Organisation's fault — penalise organisation, no compensation bonus.
             var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(pickup.CharityOrganizationId, cancellationToken);
             if (organization is not null)
             {
@@ -739,7 +766,6 @@ public class PickupsController(
         }
         else if (request.IssueType == PickupIssueType.QuantityMismatch)
         {
-            // Fix 5: light partner penalty; no org cancellation count.
             var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(pickup.HospitalityPartnerId, cancellationToken);
             if (partner is not null)
             {
@@ -763,7 +789,6 @@ public class PickupsController(
         }
         else if (request.IssueType == PickupIssueType.Other)
         {
-            // Fix 5: no automatic penalties; admin investigates.
             await notificationPublisher.NotifyAsync(
                 ActorType.Administrator,
                 0,
@@ -802,6 +827,8 @@ public class PickupsController(
         if (request.Cancel)
         {
             pickup.Status = PickupStatus.Cancelled;
+            pickup.CancellationReason ??= "Pickup cancelled after issue resolution.";
+            pickup.CancelledAtUtc = DateTime.UtcNow;
 
             if (pickup.DriverId.HasValue)
             {
@@ -893,6 +920,9 @@ public class PickupsController(
             .FirstOrDefault();
 
         pickup.Status = PickupStatus.Cancelled;
+        pickup.CancellationReason = request.Reason;
+        pickup.CancelledAtUtc = DateTime.UtcNow;
+
         if (organization is not null)
         {
             var previousCancellationCount = organization.CancellationCount;
@@ -953,6 +983,15 @@ public class PickupsController(
             MessageType = MessageType.System,
             Body = $"Pickup was cancelled by organization. Reason: {request.Reason}"
         }, cancellationToken);
+
+        // Fix: previously the next-in-line organization was notified that the offer reopened,
+        // but nextPending.NotifiedAtUtc was never set — so the scheduler's match-timeout sweep
+        // (which only inspects matches where NotifiedAtUtc.HasValue) could never expire this
+        // organization's response window, leaving the offer stuck indefinitely if they ignored it.
+        if (nextPending is not null)
+        {
+            nextPending.NotifiedAtUtc = DateTime.UtcNow;
+        }
 
         await unitOfWork.SaveChangesAsync(cancellationToken);
         await notificationPublisher.NotifyAsync(ActorType.HospitalityPartner, pickup.HospitalityPartnerId, "Pickup cancelled", request.Reason, cancellationToken, NotificationType.Cancellation);
