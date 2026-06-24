@@ -1,5 +1,6 @@
 using Bite4All.Application.DTOs.Common;
 using Bite4All.Domain.Entities;
+using Bite4All.Domain.Enums;
 using Bite4All.Domain.Repositories;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -57,6 +58,11 @@ public class CitiesController(IUnitOfWork unitOfWork) : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Deactivates a city. Blocked if there are any approved hospitality partners
+    /// or charity organizations still active in that city — deactivating a city
+    /// that has active actors would break their matching and visibility.
+    /// </summary>
     [Authorize(Roles = "Administrator")]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Deactivate(int id, CancellationToken cancellationToken)
@@ -65,6 +71,24 @@ public class CitiesController(IUnitOfWork unitOfWork) : ControllerBase
         if (city is null)
         {
             return NotFound();
+        }
+
+        // Check for active hospitality partners in this city
+        var hasActivePartners = unitOfWork.HospitalityPartners.Query()
+            .Any(p => p.CityId == id && p.ApprovalStatus == ApprovalStatus.Approved);
+
+        if (hasActivePartners)
+        {
+            return BadRequest(new { message = "Cannot deactivate a city that has approved hospitality partners. Reassign or suspend them first." });
+        }
+
+        // Check for active charity organizations in this city
+        var hasActiveOrganizations = unitOfWork.CharityOrganizations.Query()
+            .Any(o => o.CityId == id && o.ApprovalStatus == ApprovalStatus.Approved);
+
+        if (hasActiveOrganizations)
+        {
+            return BadRequest(new { message = "Cannot deactivate a city that has approved charity organizations. Reassign or suspend them first." });
         }
 
         city.IsActive = false;

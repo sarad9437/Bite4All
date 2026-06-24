@@ -1,4 +1,7 @@
 using Bite4All.API.Authorization;
+using Bite4All.Application.Commands.Drivers;
+using Bite4All.Application.Commands.Recipients;
+using Bite4All.Application.Commands.Vehicles;
 using Bite4All.Application.DTOs.Onboarding;
 using Bite4All.Application.DTOs.Organizations;
 using Bite4All.Application.Queries.Organizations;
@@ -22,6 +25,10 @@ public class OrganizationResourcesController(
     RoleManager<IdentityRole> roleManager,
     ISender sender) : ControllerBase
 {
+    // ----------------------------------------------------------------
+    // DRIVERS
+    // ----------------------------------------------------------------
+
     [HttpGet("{organizationId}/drivers")]
     public async Task<ActionResult<List<Driver>>> GetDrivers(int organizationId, CancellationToken cancellationToken)
     {
@@ -118,6 +125,137 @@ public class OrganizationResourcesController(
         return Ok(driver);
     }
 
+    [HttpPut("drivers/{driverId}")]
+    public async Task<IActionResult> UpdateDriver(int driverId, UpdateDriverRequest request, CancellationToken cancellationToken)
+    {
+        var driver = await unitOfWork.Drivers.GetByIdAsync(driverId, cancellationToken);
+        if (driver is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != driver.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(driver.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        return await sender.Send(new UpdateDriverCommand(driverId, request.FullName, request.Phone), cancellationToken)
+            ? NoContent()
+            : NotFound();
+    }
+
+    /// <summary>
+    /// Suspends a driver account. The driver cannot log in or be assigned to pickups
+    /// while suspended. Only the owning organization or an admin can do this.
+    /// </summary>
+    [HttpPut("drivers/{driverId}/suspend")]
+    public async Task<IActionResult> SuspendDriver(int driverId, SuspendRequest request, CancellationToken cancellationToken)
+    {
+        var driver = await unitOfWork.Drivers.GetByIdAsync(driverId, cancellationToken);
+        if (driver is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != driver.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!driver.IsActive)
+        {
+            return BadRequest(new { message = "Driver is already suspended." });
+        }
+
+        return await sender.Send(new SuspendDriverCommand(driverId, request.Reason), cancellationToken)
+            ? NoContent()
+            : NotFound();
+    }
+
+    /// <summary>
+    /// Reinstates a suspended driver. The driver can log in and be assigned to
+    /// pickups again.
+    /// </summary>
+    [HttpPut("drivers/{driverId}/unsuspend")]
+    public async Task<IActionResult> UnsuspendDriver(int driverId, CancellationToken cancellationToken)
+    {
+        var driver = await unitOfWork.Drivers.GetByIdAsync(driverId, cancellationToken);
+        if (driver is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != driver.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (driver.IsActive)
+        {
+            return BadRequest(new { message = "Driver is not suspended." });
+        }
+
+        return await sender.Send(new UnsuspendDriverCommand(driverId), cancellationToken)
+            ? NoContent()
+            : NotFound();
+    }
+
+    /// <summary>
+    /// Permanently deactivates a driver. Cannot be undone. Driver must not be
+    /// assigned to any active pickup.
+    /// </summary>
+    [HttpDelete("drivers/{driverId}")]
+    public async Task<IActionResult> DeactivateDriver(int driverId, CancellationToken cancellationToken)
+    {
+        var driver = await unitOfWork.Drivers.GetByIdAsync(driverId, cancellationToken);
+        if (driver is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != driver.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(driver.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        var hasActivePickup = unitOfWork.PickupDocuments.Query().Any(p =>
+            p.DriverId == driverId &&
+            p.Status != PickupStatus.Cancelled &&
+            p.Status != PickupStatus.DeliveredToOrganization);
+
+        if (hasActivePickup)
+        {
+            return BadRequest(new { message = "Driver cannot be deactivated while assigned to an active pickup." });
+        }
+
+        driver.IsActive = false;
+        driver.IsAvailable = false;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    // ----------------------------------------------------------------
+    // VEHICLES
+    // ----------------------------------------------------------------
+
     [HttpPost("vehicles")]
     public async Task<ActionResult<Vehicle>> CreateVehicle(CreateVehicleRequest request, CancellationToken cancellationToken)
     {
@@ -171,6 +309,71 @@ public class OrganizationResourcesController(
         return Ok(unitOfWork.Vehicles.Query().Where(v => v.CharityOrganizationId == organizationId).ToList());
     }
 
+    [HttpPut("vehicles/{vehicleId}")]
+    public async Task<IActionResult> UpdateVehicle(int vehicleId, UpdateVehicleRequest request, CancellationToken cancellationToken)
+    {
+        var vehicle = await unitOfWork.Vehicles.GetByIdAsync(vehicleId, cancellationToken);
+        if (vehicle is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != vehicle.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(vehicle.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        var (success, error) = await sender.Send(
+            new UpdateVehicleCommand(vehicleId, request.RegistrationNumber, request.CapacityKg, request.HasCooling),
+            cancellationToken);
+
+        return success ? NoContent() : BadRequest(new { message = error });
+    }
+
+    /// <summary>
+    /// Permanently deactivates a vehicle. Cannot be undone. Vehicle must not be
+    /// assigned to any active pickup.
+    /// </summary>
+    [HttpDelete("vehicles/{vehicleId}")]
+    public async Task<IActionResult> DeactivateVehicle(int vehicleId, CancellationToken cancellationToken)
+    {
+        var vehicle = await unitOfWork.Vehicles.GetByIdAsync(vehicleId, cancellationToken);
+        if (vehicle is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != vehicle.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(vehicle.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        var (success, error) = await sender.Send(new DeactivateVehicleCommand(vehicleId), cancellationToken);
+        return success ? NoContent() : BadRequest(new { message = error });
+    }
+
+    // ----------------------------------------------------------------
+    // RECIPIENTS
+    // ----------------------------------------------------------------
+
     [HttpPost("recipients")]
     public async Task<ActionResult<Recipient>> CreateRecipient(CreateRecipientRequest request, CancellationToken cancellationToken)
     {
@@ -199,6 +402,36 @@ public class OrganizationResourcesController(
         await unitOfWork.Recipients.AddAsync(recipient, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
         return Ok(recipient);
+    }
+
+    /// <summary>
+    /// Returns full list of recipients for the organization — including their
+    /// internal codes and dietary restrictions — for internal management.
+    /// Only the owning organization and admins can access this.
+    /// </summary>
+    [HttpGet("{organizationId}/recipients/list")]
+    public async Task<ActionResult<List<Recipient>>> GetRecipientsList(int organizationId, CancellationToken cancellationToken)
+    {
+        var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(organizationId, cancellationToken);
+        if (organization is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != organizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator() && organization.ApprovalStatus != ApprovalStatus.Approved)
+        {
+            return Forbid();
+        }
+
+        return Ok(unitOfWork.Recipients.Query()
+            .Where(r => r.CharityOrganizationId == organizationId)
+            .OrderBy(r => r.InternalCode)
+            .ToList());
     }
 
     [HttpPut("{organizationId}/temporary-capacity")]
@@ -250,8 +483,6 @@ public class OrganizationResourcesController(
             return Forbid();
         }
 
-        // Fix: also nullify expiry timestamp so the scheduler doesn't attempt a redundant
-        // reset of an already-zeroed capacity on its next tick.
         organization.TemporaryExtraCapacityKg = 0;
         organization.TemporaryCapacityExpiresAtUtc = null;
         await unitOfWork.SaveChangesAsync(cancellationToken);
@@ -279,5 +510,68 @@ public class OrganizationResourcesController(
 
         var summary = await sender.Send(new GetRecipientPrivacySummaryQuery(organizationId), cancellationToken);
         return summary is null ? NotFound() : Ok(summary);
+    }
+
+    /// <summary>
+    /// Updates the dietary restrictions of a recipient.
+    /// </summary>
+    [HttpPut("recipients/{recipientId}")]
+    public async Task<IActionResult> UpdateRecipient(int recipientId, UpdateRecipientRequest request, CancellationToken cancellationToken)
+    {
+        var recipient = await unitOfWork.Recipients.GetByIdAsync(recipientId, cancellationToken);
+        if (recipient is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != recipient.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(recipient.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        return await sender.Send(new UpdateRecipientCommand(recipientId, request.DietaryRestrictions), cancellationToken)
+            ? NoContent()
+            : NotFound();
+    }
+
+    /// <summary>
+    /// Soft-deletes a recipient. Historical distribution records are preserved.
+    /// Deactivated recipients are excluded from new distributions and dietary matching.
+    /// </summary>
+    [HttpDelete("recipients/{recipientId}")]
+    public async Task<IActionResult> DeactivateRecipient(int recipientId, CancellationToken cancellationToken)
+    {
+        var recipient = await unitOfWork.Recipients.GetByIdAsync(recipientId, cancellationToken);
+        if (recipient is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.CharityOrganizationId() != recipient.CharityOrganizationId)
+        {
+            return Forbid();
+        }
+
+        if (!User.IsAdministrator())
+        {
+            var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(recipient.CharityOrganizationId, cancellationToken);
+            if (organization is null || organization.ApprovalStatus != ApprovalStatus.Approved)
+            {
+                return Forbid();
+            }
+        }
+
+        return await sender.Send(new DeactivateRecipientCommand(recipientId), cancellationToken)
+            ? NoContent()
+            : NotFound();
     }
 }

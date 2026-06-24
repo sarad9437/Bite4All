@@ -13,23 +13,42 @@ namespace Bite4All.API.Controllers;
 public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
 {
     /// <summary>
-    /// Admin: returns all block relations in the system.
+    /// Admin: returns all block relations in the system — paginated.
     /// </summary>
     [HttpGet]
-    public async Task<ActionResult<List<BlockRelation>>> GetAll(CancellationToken cancellationToken)
+    public async Task<ActionResult<PagedResult<BlockRelation>>> GetAll(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
     {
         if (!User.IsAdministrator())
         {
             return Forbid();
         }
 
-        return Ok(unitOfWork.BlockRelations.Query().ToList());
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var query = unitOfWork.BlockRelations.Query();
+        var totalCount = query.Count();
+        var items = query
+            .OrderByDescending(b => b.CreatedAtUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<BlockRelation>
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     /// <summary>
     /// Fix 2: returns block relations involving the currently authenticated actor
-    /// (hospitality partner or charity organization). Each side can see the blocks
-    /// they initiated as well as blocks the other party placed on them.
+    /// (hospitality partner or charity organization).
     /// </summary>
     [HttpGet("my")]
     public ActionResult<List<BlockRelation>> GetMine(CancellationToken cancellationToken)
@@ -46,7 +65,6 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
 
         if (partnerId.HasValue && orgId.HasValue)
         {
-            // Edge case: user somehow has both — show all blocks for either
             query = query.Where(b =>
                 b.HospitalityPartnerId == partnerId.Value ||
                 b.CharityOrganizationId == orgId.Value);
@@ -66,8 +84,6 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
     [HttpPost]
     public async Task<ActionResult<BlockRelation>> Create(CreateBlockRequest request, CancellationToken cancellationToken)
     {
-        // Fix: strict role-based validation — a hospitality partner cannot set BlockedByOrganization
-        // and a charity organization cannot set BlockedByHospitalityPartner.
         if (!User.IsAdministrator())
         {
             var isPartner = User.HospitalityPartnerId() == request.HospitalityPartnerId;
@@ -75,7 +91,6 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
 
             if (request.BlockedByHospitalityPartner && request.BlockedByOrganization)
             {
-                // Only admin can set both flags at once
                 return Forbid();
             }
 
@@ -89,13 +104,11 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
                 return Forbid();
             }
 
-            // A partner must NOT be able to set BlockedByOrganization
             if (isPartner && !isOrganization && request.BlockedByOrganization)
             {
                 return Forbid();
             }
 
-            // An organization must NOT be able to set BlockedByHospitalityPartner
             if (isOrganization && !isPartner && request.BlockedByHospitalityPartner)
             {
                 return Forbid();
@@ -106,7 +119,6 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
                 return Forbid();
             }
 
-            // Verify approval status for the acting party
             if (request.BlockedByHospitalityPartner)
             {
                 var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(request.HospitalityPartnerId, cancellationToken);
@@ -126,8 +138,6 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
             }
         }
 
-        // Fix: prevent duplicate active block relations — return 409 Conflict instead of
-        // letting the DB unique index throw an unhandled exception.
         var existing = unitOfWork.BlockRelations.Query().FirstOrDefault(b =>
             b.HospitalityPartnerId == request.HospitalityPartnerId &&
             b.CharityOrganizationId == request.CharityOrganizationId);
@@ -139,7 +149,6 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
                 return Conflict(new { message = "An active block already exists between these two parties." });
             }
 
-            // Reactivate and update flags on a previously deactivated block
             existing.IsActive = true;
             existing.BlockedByHospitalityPartner = request.BlockedByHospitalityPartner || existing.BlockedByHospitalityPartner;
             existing.BlockedByOrganization = request.BlockedByOrganization || existing.BlockedByOrganization;

@@ -26,7 +26,6 @@ public class FoodOffersController(
     IWebHostEnvironment environment,
     ISender sender) : ControllerBase
 {
-    // 5 MB upload limit for food offer photos.
     private const long MaxPhotoBytes = 5 * 1024 * 1024;
 
     [HttpGet]
@@ -39,6 +38,84 @@ public class FoodOffersController(
     public async Task<ActionResult> Search([FromQuery] FoodOfferSearchRequest request, CancellationToken cancellationToken = default)
     {
         return Ok(await foodOfferService.SearchAsync(request, cancellationToken));
+    }
+
+    /// <summary>
+    /// Returns all food offers for a specific hospitality partner — paginated.
+    /// The partner can only see their own offers. Admins see any partner's offers.
+    /// </summary>
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpGet("partner/{hospitalityPartnerId:int}")]
+    public async Task<ActionResult> GetByPartner(
+        int hospitalityPartnerId,
+        [FromQuery] FoodOfferStatus? status = null,
+        [FromQuery] DateTime? fromUtc = null,
+        [FromQuery] DateTime? toUtc = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        if (!User.IsAdministrator() && User.HospitalityPartnerId() != hospitalityPartnerId)
+        {
+            return Forbid();
+        }
+
+        var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(hospitalityPartnerId, cancellationToken);
+        if (partner is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && partner.ApprovalStatus != ApprovalStatus.Approved)
+        {
+            return Forbid();
+        }
+
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var query = unitOfWork.FoodOffers.Query()
+            .Where(o => o.HospitalityPartnerId == hospitalityPartnerId);
+
+        if (status.HasValue)
+        {
+            query = query.Where(o => o.Status == status.Value);
+        }
+
+        if (fromUtc.HasValue)
+        {
+            query = query.Where(o => o.CreatedAtUtc >= fromUtc.Value);
+        }
+
+        if (toUtc.HasValue)
+        {
+            query = query.Where(o => o.CreatedAtUtc <= toUtc.Value);
+        }
+
+        var totalCount = query.Count();
+        var items = query
+            .OrderByDescending(o => o.CreatedAtUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        foreach (var offer in items)
+        {
+            offer.HospitalityPartner ??= partner;
+            if (offer.Items.Count == 0)
+            {
+                offer.Items = unitOfWork.FoodOfferItems.Query().Where(i => i.FoodOfferId == offer.Id).ToList();
+            }
+        }
+
+        return Ok(new
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount,
+            TotalPages = pageSize == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize)
+        });
     }
 
     [HttpGet("{id:int}")]
@@ -54,8 +131,6 @@ public class FoodOffersController(
 
         if (!isPublic)
         {
-            // Fix 9: return 404 instead of 403 for unauthenticated callers so we don't
-            // leak the existence of non-public offers to anonymous users.
             if (!(User.Identity?.IsAuthenticated ?? false))
             {
                 return NotFound();
@@ -184,6 +259,16 @@ public class FoodOffersController(
         var uploadDirectory = Path.Combine(root, "uploads", "food-offers");
         Directory.CreateDirectory(uploadDirectory);
 
+        // Delete old photo file if it exists
+        if (!string.IsNullOrWhiteSpace(offer.PhotoUrl))
+        {
+            var oldPath = Path.Combine(root, offer.PhotoUrl.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+            if (System.IO.File.Exists(oldPath))
+            {
+                System.IO.File.Delete(oldPath);
+            }
+        }
+
         var extension = Path.GetExtension(file.FileName);
         var fileName = $"{id}-{Guid.NewGuid():N}{extension}";
         var path = Path.Combine(uploadDirectory, fileName);
@@ -198,9 +283,49 @@ public class FoodOffersController(
         return Ok(new { offer.PhotoUrl });
     }
 
+    /// <summary>
+    /// Removes the photo from a food offer. The file is deleted from disk.
+    /// </summary>
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpDelete("{id}/photo")]
+    public async Task<IActionResult> DeletePhoto(int id, CancellationToken cancellationToken)
+    {
+        var offer = await unitOfWork.FoodOffers.GetByIdAsync(id, cancellationToken);
+        if (offer is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.HospitalityPartnerId() != offer.HospitalityPartnerId)
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(offer.PhotoUrl))
+        {
+            return BadRequest(new { message = "This offer does not have a photo." });
+        }
+
+        var root = environment.WebRootPath ?? Path.Combine(environment.ContentRootPath, "wwwroot");
+        var filePath = Path.Combine(root, offer.PhotoUrl.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+        if (System.IO.File.Exists(filePath))
+        {
+            System.IO.File.Delete(filePath);
+        }
+
+        offer.PhotoUrl = null;
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    // ----------------------------------------------------------------
+    // RECURRENT DONATIONS
+    // ----------------------------------------------------------------
+
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpGet("recurrent")]
     public ActionResult<List<RecurrentDonation>> GetRecurrent(
+        [FromQuery] RecurrentDonationStatus? status = null,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         CancellationToken cancellationToken = default)
@@ -218,6 +343,12 @@ public class FoodOffersController(
                 return Forbid();
             }
             query = query.Where(r => r.HospitalityPartnerId == partnerId.Value);
+        }
+
+        // Filter by status if provided
+        if (status.HasValue)
+        {
+            query = query.Where(r => r.Status == status.Value);
         }
 
         var totalCount = query.Count();
@@ -298,10 +429,88 @@ public class FoodOffersController(
     }
 
     /// <summary>
-    /// Manually materializes today's offer for a recurrent donation schedule.
-    /// Fix: guards against duplicate creation — the same schedule cannot produce more
-    /// than one offer per calendar day, whether triggered by the scheduler or manually.
+    /// Updates an existing recurrent donation schedule. Only Active or Paused
+    /// donations can be updated. Cancelled ones cannot be modified.
     /// </summary>
+    [Authorize(Roles = "HospitalityPartner,Administrator")]
+    [HttpPut("recurrent/{id:int}")]
+    public async Task<IActionResult> UpdateRecurrent(int id, UpdateRecurrentDonationRequest request, CancellationToken cancellationToken)
+    {
+        var recurrent = await unitOfWork.RecurrentDonations.GetByIdAsync(id, cancellationToken);
+        if (recurrent is null)
+        {
+            return NotFound();
+        }
+
+        if (!User.IsAdministrator() && User.HospitalityPartnerId() != recurrent.HospitalityPartnerId)
+        {
+            return Forbid();
+        }
+
+        if (recurrent.Status == RecurrentDonationStatus.Cancelled)
+        {
+            return BadRequest(new { message = "Cancelled recurrent donations cannot be updated." });
+        }
+
+        var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(recurrent.HospitalityPartnerId, cancellationToken);
+        if (!User.IsAdministrator() && (partner is null || partner.ApprovalStatus != ApprovalStatus.Approved))
+        {
+            return Forbid();
+        }
+
+        if (request.ExpectedQuantityKg.HasValue)
+        {
+            if (request.ExpectedQuantityKg.Value <= 0)
+            {
+                return BadRequest(new { message = "Expected quantity must be greater than zero." });
+            }
+            recurrent.ExpectedQuantityKg = request.ExpectedQuantityKg.Value;
+        }
+
+        if (request.Category.HasValue)
+        {
+            recurrent.Category = request.Category.Value;
+        }
+
+        if (request.LocalCreationTime.HasValue)
+        {
+            recurrent.LocalCreationTime = request.LocalCreationTime.Value;
+        }
+
+        if (request.LocalPickupStart.HasValue)
+        {
+            recurrent.LocalPickupStart = request.LocalPickupStart.Value;
+        }
+
+        if (request.LocalPickupEnd.HasValue)
+        {
+            recurrent.LocalPickupEnd = request.LocalPickupEnd.Value;
+        }
+
+        // Validate pickup window after applying updates
+        if (recurrent.LocalPickupEnd <= recurrent.LocalPickupStart)
+        {
+            return BadRequest(new { message = "Pickup end time must be after start time." });
+        }
+
+        if (request.ShelfLifeHours.HasValue)
+        {
+            if (request.ShelfLifeHours.Value < 2)
+            {
+                return BadRequest(new { message = "Shelf life must be at least 2 hours." });
+            }
+            recurrent.ShelfLifeHours = request.ShelfLifeHours.Value;
+        }
+
+        if (request.NoteTemplate is not null)
+        {
+            recurrent.NoteTemplate = request.NoteTemplate;
+        }
+
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPost("recurrent/{id}/materialize-today")]
     public async Task<ActionResult<FoodOfferDto>> MaterializeRecurrentToday(int id, CancellationToken cancellationToken)
@@ -333,8 +542,6 @@ public class FoodOffersController(
             return Forbid();
         }
 
-        // Fix: prevent duplicate — the scheduler and this endpoint must not both produce
-        // an offer for the same recurrent donation on the same calendar day.
         var todayUtc = DateTime.UtcNow.Date;
         var alreadyCreatedToday = unitOfWork.FoodOffers.Query().Any(o =>
             o.CreatedFromRecurrentDonation &&
@@ -406,10 +613,6 @@ public class FoodOffersController(
             : NotFound();
     }
 
-    /// <summary>
-    /// Resumes a previously paused recurrent donation schedule.
-    /// The scheduler will pick it up on its next tick and create offers going forward.
-    /// </summary>
     [Authorize(Roles = "HospitalityPartner,Administrator")]
     [HttpPut("recurrent/{id}/resume")]
     public async Task<IActionResult> ResumeRecurrent(int id, CancellationToken cancellationToken)
@@ -781,6 +984,8 @@ public class FoodOffersController(
             if (activePickup is not null)
             {
                 activePickup.Status = PickupStatus.Cancelled;
+                activePickup.CancellationReason = "Offer was cancelled by the hospitality partner.";
+                activePickup.CancelledAtUtc = DateTime.UtcNow;
 
                 if (activePickup.DriverId.HasValue)
                 {
@@ -801,8 +1006,6 @@ public class FoodOffersController(
                 }
             }
 
-            // Fix #2: mark the accepted match as Cancelled so no pickup document can be
-            // created against this offer after cancellation.
             acceptedMatch.Decision = MatchDecision.Cancelled;
             acceptedMatch.DecisionNote = "Offer was cancelled by the hospitality partner.";
             acceptedMatch.RespondedAtUtc = DateTime.UtcNow;

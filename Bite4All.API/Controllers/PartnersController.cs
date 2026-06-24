@@ -1,4 +1,5 @@
 using Bite4All.API.Authorization;
+using Bite4All.Application.DTOs.Common;
 using Bite4All.Domain.Entities;
 using Bite4All.Domain.Enums;
 using Bite4All.Domain.Repositories;
@@ -12,14 +13,18 @@ namespace Bite4All.API.Controllers;
 public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
 {
     /// <summary>
-    /// Returns all approved hospitality partners (public — any authenticated or anonymous user
-    /// needs to be able to discover partners for context like messaging and matching).
+    /// Returns all approved hospitality partners — paginated.
     /// </summary>
     [HttpGet]
-    public ActionResult<List<HospitalityPartner>> GetApproved(
+    public ActionResult<PagedResult<HospitalityPartner>> GetApproved(
         [FromQuery] int? cityId,
-        CancellationToken cancellationToken)
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
     {
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
         var query = unitOfWork.HospitalityPartners.Query()
             .Where(p => p.ApprovalStatus == ApprovalStatus.Approved);
 
@@ -28,7 +33,20 @@ public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
             query = query.Where(p => p.CityId == cityId.Value);
         }
 
-        return Ok(query.OrderBy(p => p.Name).ToList());
+        var totalCount = query.Count();
+        var items = query
+            .OrderBy(p => p.Name)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<HospitalityPartner>
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     /// <summary>
@@ -56,14 +74,19 @@ public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Returns all approved charity organizations (useful for admin dashboard and partner context).
+    /// Returns all approved charity organizations — paginated.
     /// </summary>
     [Authorize]
     [HttpGet("/organizations")]
-    public ActionResult<List<CharityOrganization>> GetApprovedOrganizations(
+    public ActionResult<PagedResult<CharityOrganization>> GetApprovedOrganizations(
         [FromQuery] int? cityId,
-        CancellationToken cancellationToken)
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
     {
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
         var query = unitOfWork.CharityOrganizations.Query()
             .Where(o => o.ApprovalStatus == ApprovalStatus.Approved);
 
@@ -72,7 +95,20 @@ public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
             query = query.Where(o => o.CityId == cityId.Value);
         }
 
-        return Ok(query.OrderBy(o => o.Name).ToList());
+        var totalCount = query.Count();
+        var items = query
+            .OrderBy(o => o.Name)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToList();
+
+        return Ok(new PagedResult<CharityOrganization>
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount
+        });
     }
 
     /// <summary>
