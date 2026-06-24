@@ -21,4 +21,14 @@ public class PickupDocument : Entity
     public decimal? ActualQuantityKg { get; set; }
     public string? DriverNote { get; set; }
     public DateTime? PickedUpAtUtc { get; set; }
+    /// <summary>
+    /// Populated whenever the pickup is cancelled — regardless of which actor
+    /// cancelled it (organization, partner offer cancellation, issue resolution).
+    /// Provides structured audit trail beyond the SystemMessage that is also sent.
+    /// </summary>
+    public string? CancellationReason { get; set; }
+    /// <summary>
+    /// UTC timestamp of when the cancellation occurred. Null if not cancelled.
+    /// </summary>
+    public DateTime? CancelledAtUtc { get; set; }
 }
