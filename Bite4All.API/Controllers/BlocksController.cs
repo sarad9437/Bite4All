@@ -13,10 +13,10 @@ namespace Bite4All.API.Controllers;
 public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
 {
     /// <summary>
-    /// Admin: returns all block relations in the system — paginated.
+    /// Admin: vraća sve blokade u sistemu — paginirano.
     /// </summary>
     [HttpGet]
-    public async Task<ActionResult<PagedResult<BlockRelation>>> GetAll(
+    public ActionResult<PagedResult<BlockRelation>> GetAll(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         CancellationToken cancellationToken = default)
@@ -47,8 +47,7 @@ public class BlocksController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Fix 2: returns block relations involving the currently authenticated actor
-    /// (hospitality partner or charity organization).
+    /// Vraća blokade u kojima učestvuje trenutno autentifikovani aktor.
     /// </summary>
     [HttpGet("my")]
     public ActionResult<List<BlockRelation>> GetMine(CancellationToken cancellationToken)

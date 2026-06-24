@@ -7,17 +7,22 @@ public record UpdateVehicleCommand(
     int VehicleId,
     string? RegistrationNumber,
     decimal? CapacityKg,
-    bool? HasCooling) : IRequest<bool>;
+    bool? HasCooling) : IRequest<(bool Success, string? Error)>;
 
 public class UpdateVehicleCommandHandler(IUnitOfWork unitOfWork)
-    : IRequestHandler<UpdateVehicleCommand, bool>
+    : IRequestHandler<UpdateVehicleCommand, (bool Success, string? Error)>
 {
-    public async Task<bool> Handle(UpdateVehicleCommand request, CancellationToken cancellationToken)
+    public async Task<(bool Success, string? Error)> Handle(UpdateVehicleCommand request, CancellationToken cancellationToken)
     {
         var vehicle = await unitOfWork.Vehicles.GetByIdAsync(request.VehicleId, cancellationToken);
         if (vehicle is null)
         {
-            return false;
+            return (false, "Vehicle not found.");
+        }
+
+        if (!vehicle.IsActive)
+        {
+            return (false, "Cannot update a deactivated vehicle.");
         }
 
         if (!string.IsNullOrWhiteSpace(request.RegistrationNumber))
@@ -25,8 +30,12 @@ public class UpdateVehicleCommandHandler(IUnitOfWork unitOfWork)
             vehicle.RegistrationNumber = request.RegistrationNumber;
         }
 
-        if (request.CapacityKg.HasValue && request.CapacityKg.Value > 0)
+        if (request.CapacityKg.HasValue)
         {
+            if (request.CapacityKg.Value <= 0)
+            {
+                return (false, "Capacity must be greater than zero.");
+            }
             vehicle.CapacityKg = request.CapacityKg.Value;
         }
 
@@ -36,6 +45,6 @@ public class UpdateVehicleCommandHandler(IUnitOfWork unitOfWork)
         }
 
         await unitOfWork.SaveChangesAsync(cancellationToken);
-        return true;
+        return (true, null);
     }
 }

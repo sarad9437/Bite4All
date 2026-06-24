@@ -35,6 +35,12 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             return BadRequest(new { message = "Rating must be between 1 and 5." });
         }
 
+        // Fix: aktor ne može da ocenjuje sam sebe.
+        if (request.ReviewerActorType == request.RatedActorType && request.ReviewerActorId == request.RatedActorId)
+        {
+            return BadRequest(new { message = "An actor cannot rate themselves." });
+        }
+
         var pickup = await unitOfWork.PickupDocuments.GetByIdAsync(request.PickupDocumentId, cancellationToken);
         if (pickup is null)
         {
@@ -111,10 +117,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
                 b.Level == level &&
                 !b.AssignedByAdmin);
 
-            if (alreadyAssigned)
-            {
-                continue;
-            }
+            if (alreadyAssigned) continue;
 
             await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
             {
@@ -141,10 +144,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
                 b.Level == level &&
                 !b.AssignedByAdmin);
 
-            if (alreadyAssigned)
-            {
-                continue;
-            }
+            if (alreadyAssigned) continue;
 
             await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
             {
@@ -155,10 +155,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             }, cancellationToken);
         }
 
-        // Fix: Drivers also earn badges based on completed pickups and reputation score.
-        // Bronze at 50 completed pickups, Silver at 200, Gold at 500 with reputation >= 4.5.
-        // Previously RefreshBadges never processed drivers, so driver badges were only
-        // assignable manually via POST /reputation/badges — inconsistent with partner/org behaviour.
+        // Drivers
         var drivers = unitOfWork.Drivers.Query().ToList();
         foreach (var driver in drivers.Where(d => d.CompletedPickups >= 50))
         {
@@ -174,10 +171,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
                 b.Level == level &&
                 !b.AssignedByAdmin);
 
-            if (alreadyAssigned)
-            {
-                continue;
-            }
+            if (alreadyAssigned) continue;
 
             await unitOfWork.BadgeAssignments.AddAsync(new BadgeAssignment
             {
@@ -236,11 +230,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             ActorType.HospitalityPartner => await GetHospitalityPartnerReputationAsync(actorId, cancellationToken),
             ActorType.CharityOrganization => await GetCharityOrganizationReputationAsync(actorId, cancellationToken),
             ActorType.Driver => await GetDriverReputationAsync(actorId, cancellationToken),
-            _ => new ActorReputationDetailsDto
-            {
-                ActorType = actorType,
-                ActorId = actorId
-            }
+            _ => new ActorReputationDetailsDto { ActorType = actorType, ActorId = actorId }
         };
 
         return details is null ? NotFound() : Ok(details);
@@ -291,10 +281,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
     private async Task<ActorReputationDetailsDto?> GetHospitalityPartnerReputationAsync(int actorId, CancellationToken cancellationToken)
     {
         var partner = await unitOfWork.HospitalityPartners.GetByIdAsync(actorId, cancellationToken);
-        if (partner is null)
-        {
-            return null;
-        }
+        if (partner is null) return null;
 
         var badges = unitOfWork.BadgeAssignments.Query()
             .Where(b => b.ActorType == ActorType.HospitalityPartner && b.ActorId == actorId)
@@ -312,12 +299,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             History = unitOfWork.ReputationSnapshots.Query()
                 .Where(r => r.ActorType == ActorType.HospitalityPartner && r.ActorId == actorId)
                 .OrderBy(r => r.CreatedAtUtc)
-                .Select(r => new ReputationHistoryDto
-                {
-                    RecordedAtUtc = r.CreatedAtUtc,
-                    Score = r.Score,
-                    Source = r.Source
-                })
+                .Select(r => new ReputationHistoryDto { RecordedAtUtc = r.CreatedAtUtc, Score = r.Score, Source = r.Source })
                 .ToList()
         };
     }
@@ -325,10 +307,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
     private async Task<ActorReputationDetailsDto?> GetCharityOrganizationReputationAsync(int actorId, CancellationToken cancellationToken)
     {
         var organization = await unitOfWork.CharityOrganizations.GetByIdAsync(actorId, cancellationToken);
-        if (organization is null)
-        {
-            return null;
-        }
+        if (organization is null) return null;
 
         var badges = unitOfWork.BadgeAssignments.Query()
             .Where(b => b.ActorType == ActorType.CharityOrganization && b.ActorId == actorId)
@@ -346,12 +325,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             History = unitOfWork.ReputationSnapshots.Query()
                 .Where(r => r.ActorType == ActorType.CharityOrganization && r.ActorId == actorId)
                 .OrderBy(r => r.CreatedAtUtc)
-                .Select(r => new ReputationHistoryDto
-                {
-                    RecordedAtUtc = r.CreatedAtUtc,
-                    Score = r.Score,
-                    Source = r.Source
-                })
+                .Select(r => new ReputationHistoryDto { RecordedAtUtc = r.CreatedAtUtc, Score = r.Score, Source = r.Source })
                 .ToList()
         };
     }
@@ -359,10 +333,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
     private async Task<ActorReputationDetailsDto?> GetDriverReputationAsync(int actorId, CancellationToken cancellationToken)
     {
         var driver = await unitOfWork.Drivers.GetByIdAsync(actorId, cancellationToken);
-        if (driver is null)
-        {
-            return null;
-        }
+        if (driver is null) return null;
 
         var badges = unitOfWork.BadgeAssignments.Query()
             .Where(b => b.ActorType == ActorType.Driver && b.ActorId == actorId)
@@ -380,12 +351,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             History = unitOfWork.ReputationSnapshots.Query()
                 .Where(r => r.ActorType == ActorType.Driver && r.ActorId == actorId)
                 .OrderBy(r => r.CreatedAtUtc)
-                .Select(r => new ReputationHistoryDto
-                {
-                    RecordedAtUtc = r.CreatedAtUtc,
-                    Score = r.Score,
-                    Source = r.Source
-                })
+                .Select(r => new ReputationHistoryDto { RecordedAtUtc = r.CreatedAtUtc, Score = r.Score, Source = r.Source })
                 .ToList()
         };
     }
@@ -400,10 +366,7 @@ public class ReputationController(IUnitOfWork unitOfWork) : ControllerBase
             _ => null
         };
 
-        if (!score.HasValue)
-        {
-            return;
-        }
+        if (!score.HasValue) return;
 
         await unitOfWork.ReputationSnapshots.AddAsync(new ReputationSnapshot
         {

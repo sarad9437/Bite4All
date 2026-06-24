@@ -13,7 +13,7 @@ namespace Bite4All.API.Controllers;
 public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
 {
     /// <summary>
-    /// Returns all approved hospitality partners — paginated.
+    /// Vraća sve odobrene ugostiteljske objekte — paginirano.
     /// </summary>
     [HttpGet]
     public ActionResult<PagedResult<HospitalityPartner>> GetApproved(
@@ -50,8 +50,8 @@ public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Returns a single approved hospitality partner by id.
-    /// Admins can also retrieve partners that are not yet approved.
+    /// Vraća jedan odobreni ugostiteljski objekat po ID-u.
+    /// Admin i vlasnik naloga mogu videti i neodobrene.
     /// </summary>
     [HttpGet("{id:int}")]
     public async Task<ActionResult<HospitalityPartner>> GetById(int id, CancellationToken cancellationToken)
@@ -74,7 +74,7 @@ public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Returns all approved charity organizations — paginated.
+    /// Vraća sve odobrene humanitarne organizacije — paginirano.
     /// </summary>
     [Authorize]
     [HttpGet("/organizations")]
@@ -112,7 +112,7 @@ public class PartnersController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Returns a single approved charity organization by id.
+    /// Vraća jednu odobrenu humanitarnu organizaciju po ID-u.
     /// </summary>
     [Authorize]
     [HttpGet("/organizations/{id:int}")]

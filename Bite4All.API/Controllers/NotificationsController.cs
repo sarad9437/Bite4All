@@ -13,6 +13,9 @@ namespace Bite4All.API.Controllers;
 [Route("notifications")]
 public class NotificationsController(IUnitOfWork unitOfWork) : ControllerBase
 {
+    /// <summary>
+    /// Vraća notifikacije za datog aktora — paginirano.
+    /// </summary>
     [HttpGet]
     public ActionResult<PagedResult<Notification>> GetMine(
         [FromQuery] ActorType recipientType,
@@ -73,7 +76,7 @@ public class NotificationsController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Marks all notifications for the given actor as read in a single operation.
+    /// Označava sve notifikacije za datog aktora kao pročitane.
     /// </summary>
     [HttpPut("read-all")]
     public async Task<IActionResult> MarkAllAsRead(
@@ -104,7 +107,7 @@ public class NotificationsController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Deletes a single notification. Only the recipient or an admin may delete it.
+    /// Briše pojedinačnu notifikaciju. Samo primalac ili admin mogu brisati.
     /// </summary>
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id, CancellationToken cancellationToken)
@@ -126,7 +129,7 @@ public class NotificationsController(IUnitOfWork unitOfWork) : ControllerBase
     }
 
     /// <summary>
-    /// Deletes all notifications for the given actor (bulk clear).
+    /// Briše sve notifikacije za datog aktora (bulk clear).
     /// </summary>
     [HttpDelete]
     public async Task<IActionResult> DeleteAll(
